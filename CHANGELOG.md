@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.0] — 2026-05-17
+
+### Changed
+
+- **Armature reuse: checkbox → eyedropper**: The old *Reuse Generated Armature* boolean checkbox has been replaced with a proper armature `PointerProperty` eyedropper. You now pick exactly which armature in the scene receives the next generation — no more silent fallback to a `Kimodo_Source` name-lookup. Leaving the field empty always creates a fresh armature.
+- **Auto-reuse after generation**: After each successful generation the newly used armature is automatically set as the reuse target, preserving the previous smart-default behaviour without any manual clicks.
+
+### Added
+
+- **"Pick Latest" button** (clock icon, next to the eyedropper): A one-click `KIMODO_OT_PickLatestKimodoArmature` operator that scans the scene and auto-selects the most recently generated Kimodo armature, identified by a `kimodo_creation_time` timestamp stamped on each armature at import time.
+- **`kimodo_creation_time` custom property**: Each armature imported by Kimodo now carries a `kimodo_creation_time` float property (Unix timestamp) that records when it was generated. Used internally by the *Pick Latest* operator and available for scripting.
+
+---
+
 ## [1.3.3] — 2026-05-15
 
 ### Fixed

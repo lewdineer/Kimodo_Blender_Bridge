@@ -21,7 +21,7 @@ Requirements:
 bl_info = {
     "name":        "Kimodo Blender Bridge",
     "author":      "Lewdineer",
-    "version":     (1, 3, 3),
+    "version":     (1, 4, 0),
     "blender":     (4, 2, 0),
     "location":    "View3D › Sidebar (N-Panel) › Kimodo",
     "description": "Generate human motion with NVIDIA Kimodo AI. "
