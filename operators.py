@@ -295,17 +295,10 @@ class KIMODO_OT_CancelGeneration(Operator):
 
 def _apply_to_existing_source(s, new_arm: bpy.types.Object) -> bpy.types.Object:
     """
-    If 'reuse_source_armature' is enabled and an existing source armature is
-    found, transfer the action from new_arm to it and delete new_arm.
-    Returns the armature that should be used as the source going forward.
+    If reuse_armature is set, transfer the action from new_arm to it and
+    delete new_arm.  Returns the armature that should be used going forward.
     """
-    if not s.reuse_source_armature:
-        return new_arm
-
-    # Prefer the explicitly selected source armature; fall back to name lookup.
-    existing = s.source_armature
-    if not existing or existing.type != 'ARMATURE' or existing == new_arm:
-        existing = bpy.data.objects.get("Kimodo_Source")
+    existing = s.reuse_armature
     if not existing or existing.type != 'ARMATURE' or existing == new_arm:
         return new_arm  # nothing to reuse — keep the freshly imported one
 
@@ -364,8 +357,10 @@ class KIMODO_OT_ImportBVH(Operator):
         if new_arm:
             new_arm.name = "Kimodo_Source"
             new_arm["kimodo_source"] = True
+            new_arm["kimodo_creation_time"] = time.time()
             new_arm = _apply_to_existing_source(s, new_arm)
             s.source_armature = new_arm
+            s.reuse_armature = new_arm
             self.report({'INFO'}, f"Imported '{new_arm.name}' with {len(new_arm.data.bones)} bones")
         else:
             self.report({'WARNING'}, "BVH imported but no armature found in scene.")
@@ -1158,9 +1153,11 @@ class KIMODO_OT_ImportBVHAtFrame(Operator):
             name = f"Kimodo_{self.label}" if self.label else "Kimodo_Source"
             new_arm.name = name
             new_arm["kimodo_source"] = True
+            new_arm["kimodo_creation_time"] = time.time()
             s = context.scene.kimodo
             new_arm = _apply_to_existing_source(s, new_arm)
             s.source_armature = new_arm
+            s.reuse_armature = new_arm
 
         return {'FINISHED'}
 
@@ -1550,6 +1547,31 @@ class KIMODO_OT_SetTo30FPS(Operator):
 
 
 # ---------------------------------------------------------------------------
+# Armature picker utility
+# ---------------------------------------------------------------------------
+
+class KIMODO_OT_PickLatestKimodoArmature(Operator):
+    """Auto-select the most recently generated Kimodo armature as the reuse target"""
+    bl_idname = "kimodo.pick_latest_armature"
+    bl_label  = "Pick Latest Generated Armature"
+
+    def execute(self, context):
+        s = context.scene.kimodo
+        candidates = [
+            obj for obj in context.scene.objects
+            if obj.type == 'ARMATURE' and obj.get("kimodo_source")
+        ]
+        if not candidates:
+            self.report({'WARNING'}, "No Kimodo-generated armatures found in scene")
+            return {'CANCELLED'}
+
+        latest = max(candidates, key=lambda obj: obj.get("kimodo_creation_time", 0.0))
+        s.reuse_armature = latest
+        self.report({'INFO'}, f"Reuse target set to '{latest.name}'")
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -1560,6 +1582,7 @@ _classes = [
     KIMODO_OT_CancelGeneration,
     KIMODO_OT_ImportBVH,
     KIMODO_OT_ImportBVHAtFrame,
+    KIMODO_OT_PickLatestKimodoArmature,
     KIMODO_OT_AutoMapBones,
     KIMODO_OT_AddBoneMapping,
     KIMODO_OT_RemoveBoneMapping,

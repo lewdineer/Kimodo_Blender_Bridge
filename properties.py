@@ -265,14 +265,15 @@ class KIMODO_SceneSettings(PropertyGroup):
         description="Export BVH with standard T-pose rest pose instead of BONES-SEED pose (SOMA models only)",
         default=True,
     )
-    reuse_source_armature: BoolProperty(
-        name="Reuse Generated Armature",
+    reuse_armature: PointerProperty(
+        name="Reuse Armature",
         description=(
-            "Apply the generated motion to the existing Kimodo_Source armature "
-            "instead of creating a new one. Preserves retargeting constraints "
-            "already pointing at that armature."
+            "Apply generated motion to this armature instead of creating a new one. "
+            "Preserves retargeting constraints already pointing at it. "
+            "Leave empty to always create a new armature."
         ),
-        default=True,
+        type=bpy.types.Object,
+        poll=lambda self, obj: obj.type == 'ARMATURE',
     )
 
     # Generation state (used by the modal operator)

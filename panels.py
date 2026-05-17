@@ -251,8 +251,12 @@ class KIMODO_PT_Segments(KIMODO_PanelBase, Panel):
 
         # --- Generate buttons ---
         layout.prop(s, "bvh_standard_tpose", icon='ARMATURE_DATA')
-        layout.prop(s, "reuse_source_armature", icon='FILE_REFRESH')
-    
+
+        # Reuse armature eyedropper + auto-pick button
+        reuse_row = layout.row(align=True)
+        reuse_row.prop(s, "reuse_armature", text="Reuse", icon='ARMATURE_DATA')
+        reuse_row.operator("kimodo.pick_latest_armature", text="", icon='SORTTIME')
+
         gen_row = layout.row(align=True)
         gen_row.enabled = s.is_connected and not s.is_generating
         #gen_row.operator("kimodo.generate_segment",      text="Generate Selected", icon='PLAY')
@@ -310,7 +314,10 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
 
         layout.separator()
 
-        layout.prop(s, "reuse_source_armature", icon='FILE_REFRESH')
+        # Reuse armature eyedropper + auto-pick button
+        reuse_row = layout.row(align=True)
+        reuse_row.prop(s, "reuse_armature", text="Reuse", icon='ARMATURE_DATA')
+        reuse_row.operator("kimodo.pick_latest_armature", text="", icon='SORTTIME')
 
         layout.separator()
 
