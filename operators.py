@@ -335,6 +335,60 @@ def _apply_to_existing_source(s, new_arm: bpy.types.Object) -> bpy.types.Object:
     bpy.data.objects.remove(new_arm, do_unlink=True)
     return existing
 
+
+def _iter_action_fcurves(action):
+    """Yield all FCurves from an action.
+
+    Handles both the legacy API (action.fcurves, Blender < 4.4) and the
+    layered action API (action.layers → strips → channelbag, Blender 4.4+).
+    """
+    if hasattr(action, 'fcurves'):
+        yield from action.fcurves
+        return
+    for layer in getattr(action, 'layers', []):
+        for strip in layer.strips:
+            for slot in getattr(action, 'slots', []):
+                try:
+                    cb = strip.channelbag(slot)
+                    if cb is not None:
+                        yield from cb.fcurves
+                except Exception:
+                    pass
+
+
+def _scale_root_horizontal_keyframes(arm: bpy.types.Object, scale_factor: float) -> None:
+    """Scale the root bone's horizontal (X and Y) location keyframes by scale_factor.
+
+    Compensates for an applied scale on a reused SOMA armature so that the
+    character travels the correct world-space distance per animation cycle.
+    Only the horizontal axes are touched — the vertical (Z) height comes
+    from the armature's own rest-pose bone positions and must not be scaled.
+    """
+    if abs(scale_factor - 1.0) < 1e-5:
+        return
+
+    action = arm.animation_data and arm.animation_data.action
+    if not action:
+        return
+
+    root_name = None
+    for name in ("Hips", "hips", "Hip", "pelvis", "Pelvis"):
+        if arm.pose.bones.get(name):
+            root_name = name
+            break
+    if root_name is None:
+        return
+
+    dp = f'pose.bones["{root_name}"].location'
+    for fc in _iter_action_fcurves(action):
+        if fc.data_path == dp and fc.array_index in (0, 1):  # X and Y only, not Z
+            for kp in fc.keyframe_points:
+                kp.co[1]           *= scale_factor
+                kp.handle_left[1]  *= scale_factor
+                kp.handle_right[1] *= scale_factor
+            fc.update()
+
+
 # ---------------------------------------------------------------------------
 # Import operators
 # ---------------------------------------------------------------------------
@@ -362,7 +416,7 @@ class KIMODO_OT_ImportBVH(Operator):
             axis_forward='-Z',
             axis_up='Y',
             target='ARMATURE',
-            global_scale=0.01 * s.soma_scale_factor,   # BVH is usually in cm; scale_factor compensates for applied armature scale
+            global_scale=0.01,   # BVH is usually in cm; Blender expects meters
             frame_start=1,
             use_fps_scale=False,
             update_scene_fps=False,
@@ -381,6 +435,7 @@ class KIMODO_OT_ImportBVH(Operator):
             new_arm["kimodo_source"] = True
             new_arm["kimodo_creation_time"] = time.time()
             new_arm = _apply_to_existing_source(s, new_arm)
+            _scale_root_horizontal_keyframes(new_arm, s.soma_scale_factor)
             s.source_armature = new_arm
             s.reuse_armature = new_arm
             self.report({'INFO'}, f"Imported '{new_arm.name}' with {len(new_arm.data.bones)} bones")
@@ -1167,7 +1222,7 @@ class KIMODO_OT_ImportBVHAtFrame(Operator):
             filepath=self.filepath,
             axis_forward='-Z', axis_up='Y',
             target='ARMATURE',
-            global_scale=0.01 * s.soma_scale_factor,
+            global_scale=0.01,
             frame_start=self.start_frame,
             use_fps_scale=False,
             update_scene_fps=False,
@@ -1185,6 +1240,7 @@ class KIMODO_OT_ImportBVHAtFrame(Operator):
             new_arm["kimodo_source"] = True
             new_arm["kimodo_creation_time"] = time.time()
             new_arm = _apply_to_existing_source(s, new_arm)
+            _scale_root_horizontal_keyframes(new_arm, s.soma_scale_factor)
             s.source_armature = new_arm
             s.reuse_armature = new_arm
 
