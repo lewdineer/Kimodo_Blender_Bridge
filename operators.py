@@ -336,6 +336,28 @@ def _apply_to_existing_source(s, new_arm: bpy.types.Object) -> bpy.types.Object:
     return existing
 
 
+def _iter_action_fcurves(action):
+    """Yield all FCurves from an action.
+
+    Handles both the legacy API (action.fcurves, Blender < 4.4) and the
+    layered action API (action.layers → strips → channelbag, Blender 4.4+).
+    """
+    if hasattr(action, 'fcurves'):
+        # Legacy system — still present on older Blender builds.
+        yield from action.fcurves
+        return
+    # Layered system (Blender 4.4+): layers → strips → channelbag(slot).
+    for layer in getattr(action, 'layers', []):
+        for strip in layer.strips:
+            for slot in getattr(action, 'slots', []):
+                try:
+                    cb = strip.channelbag(slot)
+                    if cb is not None:
+                        yield from cb.fcurves
+                except Exception:
+                    pass
+
+
 def _scale_root_location_keyframes(arm: bpy.types.Object, scale_factor: float) -> None:
     """Scale root-bone location keyframe values to compensate for an applied armature scale.
 
@@ -360,7 +382,7 @@ def _scale_root_location_keyframes(arm: bpy.types.Object, scale_factor: float) -
         return
 
     dp = f'pose.bones["{root_name}"].location'
-    for fc in action.fcurves:
+    for fc in _iter_action_fcurves(action):
         if fc.data_path == dp:
             for kp in fc.keyframe_points:
                 kp.co[1]           *= scale_factor
