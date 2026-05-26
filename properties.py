@@ -288,6 +288,21 @@ class KIMODO_SceneSettings(PropertyGroup):
         type=bpy.types.Object,
         poll=lambda self, obj: obj.type == 'ARMATURE',
     )
+    soma_scale_factor: FloatProperty(
+        name="Scale Factor",
+        description=(
+            "Compensate for an applied scale on the reused SOMA armature. "
+            "Set this to the value you scaled the armature by before applying "
+            "(e.g. 2.0 if you scaled up 2×, 0.5 if you scaled down to half). "
+            "Multiplies the root/hip location keyframes so the motion covers "
+            "the correct world-space distance on the rescaled skeleton."
+        ),
+        default=1.0,
+        min=0.001,
+        soft_max=10.0,
+        precision=3,
+        step=10,
+    )
 
     # Generation state (used by the modal operator)
     is_generating: BoolProperty(default=False)

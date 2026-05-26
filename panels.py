@@ -257,6 +257,11 @@ class KIMODO_PT_Segments(KIMODO_PanelBase, Panel):
         reuse_row.prop(s, "reuse_armature", text="Reuse", icon='ARMATURE_DATA')
         reuse_row.operator("kimodo.pick_latest_armature", text="", icon='SORTTIME')
 
+        # Scale factor — only relevant when reusing a scaled+applied armature
+        if s.reuse_armature:
+            scale_row = layout.row(align=True)
+            scale_row.prop(s, "soma_scale_factor", text="Scale Factor")
+
         # Transition frames control
         trans_row = layout.row(align=True)
         trans_row.enabled = s.is_connected and not s.is_generating
@@ -324,6 +329,11 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
         reuse_row = layout.row(align=True)
         reuse_row.prop(s, "reuse_armature", text="Reuse", icon='ARMATURE_DATA')
         reuse_row.operator("kimodo.pick_latest_armature", text="", icon='SORTTIME')
+
+        # Scale factor — only relevant when reusing a scaled+applied armature
+        if s.reuse_armature:
+            scale_row = layout.row(align=True)
+            scale_row.prop(s, "soma_scale_factor", text="Scale Factor")
 
         layout.separator()
 
