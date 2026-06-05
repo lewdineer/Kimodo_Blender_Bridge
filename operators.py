@@ -1886,6 +1886,28 @@ class KIMODO_OT_GenerateVariations(Operator):
 
 
 # ---------------------------------------------------------------------------
+# Install Python picker
+# ---------------------------------------------------------------------------
+
+class KIMODO_OT_PickInstallPython(Operator):
+    """Browse for the Python 3.10+ executable to use when creating the managed venv"""
+    bl_idname = "kimodo.pick_install_python"
+    bl_label = "Browse for Python Executable"
+    bl_options = {'REGISTER', 'INTERNAL'}
+
+    filepath: StringProperty(subtype='FILE_PATH')
+
+    def invoke(self, context, event):
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        prefs = context.preferences.addons[__package__].preferences
+        prefs.install_python_path = self.filepath
+        return {'FINISHED'}
+
+
+# ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
 
@@ -1934,6 +1956,7 @@ _classes = [
     KIMODO_OT_PreviewConstraintsJSON,
     KIMODO_OT_ClearConstraints,
     KIMODO_OT_SetTo30FPS,
+    KIMODO_OT_PickInstallPython,
 ]
 
 

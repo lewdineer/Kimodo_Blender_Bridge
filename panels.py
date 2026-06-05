@@ -53,13 +53,19 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.label(text="Python 3.10–3.12 required!", icon='ERROR')
                 box.separator(factor=0.3)
                 box.label(text="No compatible Python was found on your system.")
-                box.label(text="Click below to download the Python 3.12 installer (Windows 64-bit).")
+                box.label(text="Option A: download and install Python, then click Retry.")
                 box.label(text='Run it, tick "Add Python to PATH".')
                 box.label(text="On Windows: run the installer as Administrator.")
                 box.label(text="Then restart Blender before clicking Retry Install.", icon='ERROR')
                 box.separator(factor=0.3)
                 box.operator("kimodo.open_python_download",
                              text="Download Python 3.12 Installer", icon='URL')
+                box.separator(factor=0.3)
+                box.label(text="Option B: browse directly to your python.exe:", icon='BLANK1')
+                prefs = context.preferences.addons[__package__].preferences
+                row = box.row(align=True)
+                row.prop(prefs, "install_python_path", text="")
+                row.operator("kimodo.pick_install_python", text="", icon='FILE_FOLDER')
                 box.separator(factor=0.3)
             else:
                 box.label(text="Installation incomplete", icon='ERROR')
@@ -83,6 +89,13 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.label(text="Kimodo not installed", icon='INFO')
             box.label(text="Installs to:  ~/.kimodo-venv/")
             box.label(text="Requires:  Python 3.10+, ~8 GB disk, internet")
+            prefs = context.preferences.addons[__package__].preferences
+            box.separator(factor=0.3)
+            box.label(text="System Python (leave blank to auto-detect):", icon='CONSOLE')
+            row = box.row(align=True)
+            row.prop(prefs, "install_python_path", text="")
+            row.operator("kimodo.pick_install_python", text="", icon='FILE_FOLDER')
+            box.separator(factor=0.3)
             row = box.row()
             row.enabled = has_gpu
             row.operator("kimodo.install_kimodo", icon='IMPORT')

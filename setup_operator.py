@@ -386,20 +386,65 @@ def _patch_wrapper(wrapper_path: str, local_dir: str) -> None:
 # Background install thread
 # ---------------------------------------------------------------------------
 
+def _get_addon_prefs():
+    """Return KIMODO_AddonPreferences, or None if not yet registered."""
+    try:
+        import bpy as _bpy
+        return _bpy.context.preferences.addons[__package__].preferences
+    except Exception:
+        return None
+
+
 def _do_install() -> None:
     global _state
     try:
-        # 1 — Find a system Python ≥ 3.10
-        _log("Searching for system Python 3.10+…")
-        sys_py = _find_system_python()
-        if not sys_py:
-            with _lock:
-                _state["needs_python"] = True
-            raise RuntimeError(
-                "No Python 3.10+ found. "
-                "Install it from python.org (tick 'Add Python to PATH'), "
-                "then click Retry Install."
-            )
+        # 1 — Find a system Python ≥ 3.10.
+        # A manually-selected path in addon preferences takes priority over
+        # auto-detection so users on Windows (or non-standard installs) can
+        # point directly at their python.exe if detection fails.
+        prefs = _get_addon_prefs()
+        manual = (prefs.install_python_path.strip()
+                  if prefs and prefs.install_python_path.strip() else "")
+
+        if manual:
+            _log(f"Using manually selected Python: {manual}")
+            # Validate it before trusting it.
+            if not os.path.isfile(manual):
+                raise RuntimeError(
+                    f"Manual Python path not found: {manual}\n"
+                    "Please check the path in the System Python field."
+                )
+            try:
+                r = subprocess.run(
+                    [manual, "-c",
+                     "import sys; v=sys.version_info; print(v.major, v.minor)"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                parts = r.stdout.strip().split()
+                if not (len(parts) == 2 and int(parts[0]) == 3 and int(parts[1]) >= 10):
+                    raise RuntimeError(
+                        f"The selected Python is not 3.10+: {manual}\n"
+                        "Please select a Python 3.10 or newer executable."
+                    )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Could not run the selected Python: {manual}\n{exc}"
+                ) from exc
+            sys_py = manual
+        else:
+            _log("Searching for system Python 3.10+…")
+            sys_py = _find_system_python()
+            if not sys_py:
+                with _lock:
+                    _state["needs_python"] = True
+                raise RuntimeError(
+                    "No Python 3.10+ found. "
+                    "Install it from python.org (tick 'Add Python to PATH'), "
+                    "or select it manually using the 'System Python' field, "
+                    "then click Retry Install."
+                )
         _log(f"Found: {sys_py}")
 
         # 2 — Create venv

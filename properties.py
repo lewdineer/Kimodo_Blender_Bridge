@@ -429,6 +429,16 @@ class KIMODO_AddonPreferences(AddonPreferences):
         default="{}",
     )
 
+    install_python_path: StringProperty(
+        name="System Python",
+        description=(
+            "Path to a Python 3.10+ executable used to create the managed venv. "
+            "Leave blank to auto-detect."
+        ),
+        default="",
+        subtype='FILE_PATH',
+    )
+
 
 # ---------------------------------------------------------------------------
 # Registration
