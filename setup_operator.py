@@ -30,14 +30,55 @@ _SYSTEM_BIN_PATHS = [
     "/usr/local/sbin", "/usr/sbin", "/sbin",
 ]
 
-# Common locations where Python interpreters are installed outside of PATH
-# (pyenv, deadsnakes PPA, system Python on various distros).
-_EXTRA_PYTHON_DIRS = [
-    "/usr/bin",
-    "/usr/local/bin",
-    os.path.expanduser("~/.local/bin"),
-    os.path.expanduser("~/.pyenv/shims"),
-]
+# Common locations where Python interpreters are installed outside of PATH.
+# On Windows we probe the standard per-user and system-wide install trees;
+# on Unix we probe system and pyenv/deadsnakes locations.
+def _extra_python_dirs() -> list:
+    if os.name == "nt":
+        dirs = []
+        for minor in (12, 13, 11, 10):
+            tag = f"Python3{minor}"
+            dirs += [
+                os.path.expanduser(f"~\\AppData\\Local\\Programs\\Python\\{tag}"),
+                f"C:\\{tag}",
+                f"C:\\Program Files\\{tag}",
+                f"C:\\Program Files (x86)\\{tag}",
+            ]
+        return dirs
+    return [
+        "/usr/bin",
+        "/usr/local/bin",
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.pyenv/shims"),
+    ]
+
+_EXTRA_PYTHON_DIRS = _extra_python_dirs()
+
+
+def _python_paths_from_registry() -> list:
+    """Return Python executable paths found in the Windows registry (empty on non-Windows)."""
+    if os.name != "nt":
+        return []
+    import winreg
+    results = []
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for minor in (12, 13, 11, 10):
+            key_path = f"SOFTWARE\\Python\\PythonCore\\3.{minor}\\InstallPath"
+            for value_name in ("ExecutablePath", ""):
+                try:
+                    with winreg.OpenKey(hive, key_path) as k:
+                        val, _ = winreg.QueryValueEx(k, value_name)
+                        if not val:
+                            continue
+                        # ExecutablePath points directly to python.exe;
+                        # the default value ("") is the install directory.
+                        exe = val if value_name == "ExecutablePath" else os.path.join(val, "python.exe")
+                        if os.path.isfile(exe) and exe not in results:
+                            results.append(exe)
+                        break
+                except OSError:
+                    pass
+    return results
 
 
 def _build_env(extra: "dict | None" = None) -> dict:
@@ -184,7 +225,38 @@ def _find_system_python() -> str:
     # shutil.which respects the current PATH, which may be stripped in a
     # desktop session, so we also probe known install directories directly.
     candidates: list[str] = []
-    for name in ("python3.12", "python3.13", "python3.11", "python3.10", "python3", "python"):
+
+    # On Windows: registry entries are the most reliable source — they exist
+    # even when the install directory is not on PATH.
+    for reg_exe in _python_paths_from_registry():
+        if reg_exe not in candidates:
+            candidates.append(reg_exe)
+
+    # On Windows: the Python Launcher (py.exe) can resolve a specific version
+    # even when neither the install dir nor python.exe is on PATH.
+    if os.name == "nt":
+        py_launcher = shutil.which("py", path=_build_env()["PATH"]) or "py"
+        for minor in (12, 13, 11, 10):
+            try:
+                r = subprocess.run(
+                    [py_launcher, f"-3.{minor}", "-c", "import sys; print(sys.executable)"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                exe = r.stdout.strip()
+                if exe and os.path.isfile(exe) and exe not in candidates:
+                    candidates.append(exe)
+            except Exception:
+                pass
+
+    # On Windows python.org installs create python.exe, not python3.12.exe, so
+    # include the plain .exe names in the which/dir search.
+    if os.name == "nt":
+        names = ("python3.12", "python3.13", "python3.11", "python3.10",
+                 "python3", "python", "python.exe")
+    else:
+        names = ("python3.12", "python3.13", "python3.11", "python3.10", "python3", "python")
+
+    for name in names:
         # Honour PATH first (covers pyenv shims, conda envs, user installs).
         via_which = shutil.which(name, path=_build_env()["PATH"])
         if via_which and via_which not in candidates:
