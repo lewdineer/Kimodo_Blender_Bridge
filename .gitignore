@@ -1,11 +1,3 @@
-__pycache__/__init__.cpython-313.pyc
-__pycache__/constraints.cpython-313.pyc
-__pycache__/gradio_client.cpython-310.pyc
-__pycache__/operators.cpython-313.pyc
-__pycache__/panels.cpython-313.pyc
-__pycache__/properties.cpython-313.pyc
-__pycache__/retarget.cpython-313.pyc
-__pycache__/subprocess_client.cpython-313.pyc
-__pycache__/timeline.cpython-313.pyc
-__pycache__/ui_list.cpython-313.pyc
+__pycache__/
+*.pyc
 CLAUDE.md

@@ -4,7 +4,7 @@ Constraint-based motion retargeting from Kimodo armature → user's rig.
 
 Three modes per bone pair
 --------------------------
-COPY_ROTATION   Copy Rotation in LOCAL space.
+COPY_ROTATION   Copy Rotation in WORLD space.
                 Root bone additionally gets Copy Location.
                 Good for rigs with the same rest pose as Kimodo.
 

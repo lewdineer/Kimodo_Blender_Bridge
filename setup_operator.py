@@ -39,6 +39,13 @@ _EXTRA_PYTHON_DIRS = [
     os.path.expanduser("~/.pyenv/shims"),
 ]
 
+# Prevent a console window from flashing up for every subprocess on Windows
+# (Blender is a GUI process; child console apps like python/pip/nvidia-smi
+# get their own window unless CREATE_NO_WINDOW is passed).
+_NO_WINDOW = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+)
+
 # ---------------------------------------------------------------------------
 # HuggingFace download settings
 # ---------------------------------------------------------------------------
@@ -162,13 +169,30 @@ def managed_python() -> str:
     return ""
 
 
+# Cached GPU presence — panels call has_nvidia_gpu() from draw(), which runs
+# on every viewport redraw; spawning nvidia-smi there would stall the UI
+# (and flash a console window per redraw on Windows).
+_GPU_PRESENT: "bool | None" = None
+
+
 def has_nvidia_gpu() -> bool:
-    """Return True if an NVIDIA GPU is present (nvidia-smi responds)."""
+    """Return True if an NVIDIA GPU is present (nvidia-smi responds).
+
+    The result is detected once and cached for the session — safe to call
+    from panel draw() callbacks.
+    """
+    global _GPU_PRESENT
+    if _GPU_PRESENT is None:
+        _GPU_PRESENT = _detect_nvidia_gpu()
+    return _GPU_PRESENT
+
+
+def _detect_nvidia_gpu() -> bool:
     try:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
             capture_output=True, timeout=5,
-            env=_build_env(),
+            env=_build_env(), **_NO_WINDOW,
         )
         return r.returncode == 0 and bool(r.stdout.strip())
     except Exception:
@@ -181,7 +205,7 @@ def _max_gpu_compute_capability() -> tuple[int, int]:
         r = subprocess.run(
             ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=5, env=_build_env(),
+            timeout=5, env=_build_env(), **_NO_WINDOW,
         )
         if r.returncode != 0:
             return (0, 0)
@@ -240,7 +264,7 @@ def _find_system_python() -> str:
                 [found, "-c",
                  "import sys; v=sys.version_info; print(v.major, v.minor)"],
                 capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=5,
+                errors="replace", timeout=5, **_NO_WINDOW,
             )
             parts = r.stdout.strip().split()
             if len(parts) == 2 and int(parts[0]) == 3 and int(parts[1]) >= 10:
@@ -255,7 +279,7 @@ def _git_available() -> bool:
     try:
         r = subprocess.run(
             ["git", "--version"], capture_output=True, timeout=5,
-            env=_build_env(),
+            env=_build_env(), **_NO_WINDOW,
         )
         return r.returncode == 0
     except Exception:
@@ -288,6 +312,7 @@ def _run(cmd: list, step: str, env: "dict | None" = None,
         errors="replace",
         bufsize=1,
         env=_build_env(env),
+        **_NO_WINDOW,
     )
     for line in proc.stdout:
         stripped = line.rstrip()
@@ -388,7 +413,7 @@ def _find_wrapper(venv_py: str) -> str:
          "import importlib.util; s=importlib.util.find_spec('kimodo'); "
          "print(s.origin if s else '')"],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=10,
+        timeout=10, **_NO_WINDOW,
     )
     origin = r.stdout.strip()
     if not origin:
@@ -467,7 +492,7 @@ def _do_install(hf_token: str = "") -> None:
         r = subprocess.run(
             [venv_py, "-c", "import sys; print(sys.version_info.minor)"],
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=5,
+            errors="replace", timeout=5, **_NO_WINDOW,
         )
         py_minor = int(r.stdout.strip() or "0")
         gpu_cap = _max_gpu_compute_capability()
@@ -501,7 +526,7 @@ def _do_install(hf_token: str = "") -> None:
             [venv_py, "-c",
              "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')"],
             capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=5,
+            errors="replace", timeout=5, **_NO_WINDOW,
         )
         py_tag = r.stdout.strip()  # e.g. "cp312"
 
@@ -567,7 +592,7 @@ def _do_install(hf_token: str = "") -> None:
             "Installing kimodo-viser",
         )
 
-        # 10 — Locate llm2vec_wrapper.py
+        # 9 — Locate llm2vec_wrapper.py
         _log("Locating LLM2Vec wrapper in installed package…")
         wrapper = _find_wrapper(venv_py)
         if not wrapper:
@@ -577,7 +602,7 @@ def _do_install(hf_token: str = "") -> None:
             )
         _log(f"Found wrapper: {wrapper}")
 
-        # 11 — Download the LLM2Vec text-encoder model to a local folder.
+        # 10 — Download the LLM2Vec text-encoder model to a local folder.
         #     The Aero-Ex fork hosts the model at Aero-Ex/KIMODO-Meta3_llm2vec_NF4
         #     on HuggingFace.  We download it once and point the wrapper at it.
         _log(f"Downloading LLM2Vec model ({LLMVEC_MODEL_ID}) — this may take a while…")
@@ -590,12 +615,12 @@ def _do_install(hf_token: str = "") -> None:
             hf_token=hf_token,
         )
 
-        # 12 — Patch wrapper for fully offline operation
+        # 11 — Patch wrapper for fully offline operation
         _log("Patching llm2vec_wrapper.py for offline use…")
         _patch_wrapper(wrapper, LLMVEC_DIR)
         _log("Patch applied.")
 
-        # 13 — Download Kimodo model weights into the HF cache.
+        # 12 — Download Kimodo model weights into the HF cache.
         #      load_model.py calls snapshot_download unconditionally ("will check
         #      online no matter what"), so the weights must be in the local cache
         #      before we enable HF_HUB_OFFLINE at bridge launch time.
@@ -609,7 +634,7 @@ def _do_install(hf_token: str = "") -> None:
             hf_token=hf_token,
         )
 
-        # 14 — Update the addon's Python path on the main thread
+        # 13 — Update the addon's Python path on the main thread
         def _set_path():
             try:
                 for scene in bpy.data.scenes:
@@ -750,10 +775,16 @@ class KIMODO_OT_OpenPythonDownload(Operator):
 
     def execute(self, context):
         import platform, webbrowser
-        arch = "arm64" if platform.machine().lower() == "arm64" else "amd64"
-        webbrowser.open(
-            f"https://www.python.org/ftp/python/3.12.10/python-3.12.10-{arch}.exe"
-        )
+        if os.name == "nt":
+            # Direct link to the Windows installer for the user's architecture
+            arch = "arm64" if platform.machine().lower() == "arm64" else "amd64"
+            webbrowser.open(
+                f"https://www.python.org/ftp/python/3.12.10/python-3.12.10-{arch}.exe"
+            )
+        else:
+            # Linux/macOS: no .exe — point at the downloads page (most Linux
+            # users will install via their package manager anyway).
+            webbrowser.open("https://www.python.org/downloads/")
         return {"FINISHED"}
 
 

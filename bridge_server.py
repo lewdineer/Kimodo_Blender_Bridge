@@ -28,7 +28,7 @@ def _out(obj: dict) -> None:
 # ---------------------------------------------------------------------------
 
 def _save_output(output, output_format, model, device, standard_tpose, prefix="kimodo_"):
-    """Save model output dict to a temp file; returns (can_do_bvh, out_path)."""
+    """Save model output dict to a temp file; returns the saved file path."""
     import torch
     from kimodo.exports.bvh import save_motion_bvh
     from kimodo.exports.motion_io import save_kimodo_npz

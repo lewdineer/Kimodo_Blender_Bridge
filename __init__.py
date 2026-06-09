@@ -1,19 +1,20 @@
 """
 Kimodo Blender Bridge
 =====================
-Connects Blender to a running NVIDIA Kimodo Gradio demo for AI-powered
-human(oid) motion generation directly inside Blender.
+Runs NVIDIA Kimodo in a managed subprocess for AI-powered human(oid)
+motion generation directly inside Blender.
 
 Features:
-  • Generate motion from text prompts via the Kimodo Gradio REST API
+  • Generate motion from text prompts via a persistent bridge process
+    (bridge_server.py, JSON over stdin/stdout — model loads once)
   • Automatic BVH import into Blender armature
   • Custom bone-mapping retargeting to any existing rig
   • Constraint-based retargeting with one-click bake
   • Save / load bone mapping presets
 
 Requirements:
-  • Blender 4.0+ (tested on 4.x and 5.x)
-  • Kimodo demo running locally (or remotely with port forwarding)
+  • Blender 4.2+ (tested on 4.x and 5.x)
+  • NVIDIA GPU (CUDA); Kimodo is installed automatically into ~/.kimodo-venv
     See: https://github.com/nv-tlabs/kimodo
 
 """
@@ -21,7 +22,7 @@ Requirements:
 bl_info = {
     "name":        "Kimodo Blender Bridge",
     "author":      "Lewdineer",
-    "version":     (1, 5, 1),
+    "version":     (1, 5, 2),
     "blender":     (4, 2, 0),
     "location":    "View3D › Sidebar (N-Panel) › Kimodo",
     "description": "Generate human motion with NVIDIA Kimodo AI. "

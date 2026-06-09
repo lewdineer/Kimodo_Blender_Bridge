@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.5.2] — 2026-06-09
+
+### Fixed
+
+- **Cancel now actually cancels**: Clicking *Cancel* previously only updated the UI — the in-flight result was still imported when it arrived, and a second generation could be started on the same pipe, causing the new request to consume the old request's response (wrong file imported). Cancel now discards the abandoned result (including its temp file), the modal operators report "Cancelled" instead of importing, and the bridge pipe refuses new requests until the abandoned job has drained.
+- **Startup/generation timeouts could never fire**: Waiting for bridge messages used a blocking `readline()`, so a bridge process that hung without printing (e.g. stuck CUDA init) froze the start thread forever and the UI stayed on "Starting…" past the 7-minute ceiling. Bridge stdout is now drained by a dedicated reader thread into a queue that is polled with real timeouts.
+- **`nvidia-smi` ran on every viewport redraw**: The Connection panel called the GPU check from `draw()`, spawning an `nvidia-smi` subprocess (5 s timeout) dozens of times per second while Kimodo was not installed — UI stutter on Linux and a console-window flash per redraw on Windows. The result is now detected once and cached for the session.
+- **Console windows flashing on Windows**: All subprocesses (bridge server, pip, venv, git, nvidia-smi, Python probes) are now launched with `CREATE_NO_WINDOW` so no console windows pop up over Blender.
+- **Bridge still hit the network on every start**: `HF_HUB_OFFLINE=1` is now set for the bridge subprocess when the managed venv is used (alongside the existing `TRANSFORMERS_OFFLINE`/`HF_DATASETS_OFFLINE`), so `load_model`'s unconditional `snapshot_download` uses the pre-downloaded cache instead of contacting HuggingFace — faster starts, no rate-limiting, works offline.
+- **Random seed overflow**: `random.randint(0, 2**31)` could (rarely) produce `2**31`, which overflows Blender's 32-bit `IntProperty` when written to history/segment seeds. Upper bound corrected to `2**31 - 1`.
+- **Silent constraint drops**: Segment and multi-prompt generation swallowed constraint-build errors and silently generated *unconstrained* motion. A warning is now reported when constraints fail to build, matching the single-generate path.
+- **Conda env roots on Windows**: Pointing the *Kimodo Python* field at a conda env root now works — `python.exe` at the env root is probed in addition to `Scripts/python.exe`.
+- **Stop/receive race**: Stopping the bridge while a generation was waiting for a response could raise `AttributeError` instead of reporting "process died" (fixed as part of the queue-based reader).
+
+### Changed
+
+- **Python download button is OS-aware**: On Linux/macOS it now opens the python.org downloads page instead of a Windows `.exe` installer.
+- **Help panel** quick-start updated to reference the auto-installer instead of the pre-1.2.0 manual venv setup.
+
+### Removed
+
+- **`gradio_client.py`** (dead code): leftover from the pre-subprocess Gradio REST architecture; nothing imported it. Module docstrings updated to describe the bridge architecture.
+- **Committed `__pycache__/*.pyc` files** removed from version control; `.gitignore` now ignores `__pycache__/` as a whole instead of individual files.
+
 ## [1.5.1] — 2026-06-09
 
 ### Fixed

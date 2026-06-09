@@ -25,14 +25,15 @@ _generation_state = {
     "running": False,
     "done": False,
     "success": False,
+    "cancelled": False, # user requested cancel; discard the result
     "result": "",       # file path on success, error message on failure
     "progress": "",
 }
 
 
 def _reset_state():
-    _generation_state.update(running=False, done=False,
-                              success=False, result="", progress="")
+    _generation_state.update(running=False, done=False, success=False,
+                              cancelled=False, result="", progress="")
 
 
 _HISTORY_MAX = 20
@@ -208,8 +209,8 @@ class KIMODO_OT_Generate(Operator):
             self.report({'WARNING'}, "Already generating — please wait.")
             return {'CANCELLED'}
 
-        # Resolve seed
-        seed = s.seed if s.seed >= 0 else random.randint(0, 2**31)
+        # Resolve seed (upper bound must stay within a 32-bit IntProperty)
+        seed = s.seed if s.seed >= 0 else random.randint(0, 2**31 - 1)
         self._resolved_seed = seed
 
         # Launch background thread
@@ -274,7 +275,10 @@ class KIMODO_OT_Generate(Operator):
         context.window_manager.event_timer_remove(self._timer)
         s.is_generating = False
 
-        if _generation_state["success"]:
+        if _generation_state["cancelled"]:
+            s.generation_progress = "Cancelled"
+            self.report({'INFO'}, "Generation cancelled — result discarded.")
+        elif _generation_state["success"]:
             file_path = _generation_state["result"]
             s.last_bvh_path = file_path
             s.generation_progress = "Done ✓"
@@ -300,15 +304,20 @@ class KIMODO_OT_Generate(Operator):
 
 
 class KIMODO_OT_CancelGeneration(Operator):
-    """Cancel ongoing generation (marks as cancelled; thread will finish naturally)"""
+    """Cancel ongoing generation. The bridge cannot abort mid-diffusion, so the
+    in-flight result is discarded when it arrives; a new generation can start
+    once the bridge finishes the abandoned job."""
     bl_idname = "kimodo.cancel_generation"
     bl_label = "Cancel"
 
     def execute(self, context):
-        _generation_state["running"] = False
-        context.scene.kimodo.is_generating = False
-        context.scene.kimodo.generation_progress = "Cancelled"
-        self.report({'INFO'}, "Cancellation requested.")
+        if not context.scene.kimodo.is_generating:
+            self.report({'INFO'}, "Nothing is generating.")
+            return {'CANCELLED'}
+        _generation_state["cancelled"] = True
+        sc.request_cancel()
+        context.scene.kimodo.generation_progress = "Cancelling…"
+        self.report({'INFO'}, "Cancellation requested — result will be discarded.")
         return {'FINISHED'}
 
 
@@ -863,14 +872,17 @@ class KIMODO_OT_GenerateSegment(Operator):
     def _start_generation(self, context, s, seg):
         import random as _random
 
-        seed = seg.seed if seg.seed >= 0 else _random.randint(0, 2**31)
+        seed = seg.seed if seg.seed >= 0 else _random.randint(0, 2**31 - 1)
         self._resolved_seed = seed
         fps  = context.scene.render.fps / context.scene.render.fps_base
         duration = (seg.end_frame - seg.start_frame + 1) / fps
         self._segment_duration = duration
 
         # Build constraints for this segment if any exist
-        constraints_json = _build_segment_constraints(context, seg)
+        constraints_json, con_err = _build_segment_constraints(context, seg)
+        if con_err:
+            self.report({'WARNING'},
+                        f"Constraint build failed (generating without): {con_err}")
 
         _reset_state()
         _generation_state["running"] = True
@@ -926,7 +938,10 @@ class KIMODO_OT_GenerateSegment(Operator):
         s.is_generating = False
         s.generating_segment_index = -1
 
-        if _generation_state["success"]:
+        if _generation_state["cancelled"]:
+            s.generation_progress = "Cancelled"
+            self.report({'INFO'}, "Generation cancelled — result discarded.")
+        elif _generation_state["success"]:
             file_path = _generation_state["result"]
             seg = s.motion_segments[self._target_segment_idx]
             seg.last_bvh_path = file_path
@@ -977,16 +992,18 @@ def _enforce_segment_continuity(ordered_segs):
     return changed
 
 
-def _build_multi_prompt_constraints(context, first_start_frame: int) -> "str | None":
+def _build_multi_prompt_constraints(context, first_start_frame: int) -> "tuple[str | None, str | None]":
     """Build scene constraints JSON for multi-prompt generation.
 
     Uses first_start_frame as the Kimodo sequence origin so constraint frame
     indices align with the combined BVH that starts at that Blender frame.
+    Returns (constraints_json, error_message) — error_message is set when the
+    build failed so the caller can warn instead of silently dropping them.
     """
     s = context.scene.kimodo
     enabled = [c for c in s.motion_constraints if c.enabled and c.marker_object]
     if not enabled:
-        return None
+        return None, None
     try:
         data = cmod.build_constraints_json(
             s.motion_constraints, context.scene,
@@ -994,9 +1011,9 @@ def _build_multi_prompt_constraints(context, first_start_frame: int) -> "str | N
             auto_canonicalize=s.auto_canonicalize,
             scene_start_override=first_start_frame,
         )
-        return json.dumps(data) if data else None
-    except Exception:
-        return None
+        return (json.dumps(data) if data else None), None
+    except Exception as exc:
+        return None, str(exc)
 
 
 class KIMODO_OT_GenerateAllSegments(Operator):
@@ -1042,10 +1059,13 @@ class KIMODO_OT_GenerateAllSegments(Operator):
 
         # Use the first enabled segment's seed (or random if unset)
         first_seg = ordered[0][1]
-        seed = first_seg.seed if first_seg.seed >= 0 else random.randint(0, 2**31)
+        seed = first_seg.seed if first_seg.seed >= 0 else random.randint(0, 2**31 - 1)
 
         # Build constraints relative to the start of the combined sequence
-        constraints_json = _build_multi_prompt_constraints(context, self._start_frame)
+        constraints_json, con_err = _build_multi_prompt_constraints(context, self._start_frame)
+        if con_err:
+            self.report({'WARNING'},
+                        f"Constraint build failed (generating without): {con_err}")
 
         s.is_generating = True
         s.generating_segment_index = self._segment_indices[0]
@@ -1108,7 +1128,10 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         s.is_generating = False
         s.generating_segment_index = -1
 
-        if _generation_state["success"]:
+        if _generation_state["cancelled"]:
+            s.generation_progress = "Cancelled"
+            self.report({'INFO'}, "Generation cancelled — result discarded.")
+        elif _generation_state["success"]:
             file_path = _generation_state["result"]
 
             # Mark all segments as generated and store the shared path
@@ -1203,23 +1226,25 @@ def _tag_timeline_redraw(context):
             area.tag_redraw()
 
 
-def _build_segment_constraints(context, seg) -> str | None:
-    """Build constraints JSON for a segment (reuses scene-level constraints for now)."""
+def _build_segment_constraints(context, seg) -> "tuple[str | None, str | None]":
+    """Build constraints JSON for a segment (reuses scene-level constraints for now).
+
+    Returns (constraints_json, error_message) — error_message is set when the
+    build failed so the caller can warn instead of silently dropping them.
+    """
     s = context.scene.kimodo
     enabled = [c for c in s.motion_constraints if c.enabled and c.marker_object]
     if not enabled:
-        return None
+        return None, None
     try:
-        from . import constraints as cmod
         data = cmod.build_constraints_json(
             s.motion_constraints, context.scene,
             kimodo_fps=s.kimodo_fps,
             auto_canonicalize=s.auto_canonicalize,
         )
-        import json
-        return json.dumps(data)
-    except Exception:
-        return None
+        return json.dumps(data), None
+    except Exception as exc:
+        return None, str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -1765,7 +1790,7 @@ class KIMODO_OT_GenerateVariations(Operator):
             return {'CANCELLED'}
 
         self._total       = s.num_variations
-        self._seeds       = [random.randint(0, 2**31) for _ in range(self._total)]
+        self._seeds       = [random.randint(0, 2**31 - 1) for _ in range(self._total)]
         self._current_idx = 0
 
         s.is_generating = True
@@ -1832,6 +1857,14 @@ class KIMODO_OT_GenerateVariations(Operator):
         # One variation finished
         seed      = self._seeds[self._current_idx]
         var_num   = self._current_idx + 1
+
+        if _generation_state["cancelled"]:
+            context.window_manager.event_timer_remove(self._timer)
+            s.is_generating = False
+            s.generation_progress = "Cancelled"
+            self.report({'INFO'},
+                        f"Variations cancelled after {self._current_idx} of {self._total}.")
+            return {'FINISHED'}
 
         if not _generation_state["success"]:
             context.window_manager.event_timer_remove(self._timer)
