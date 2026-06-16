@@ -653,11 +653,15 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
         if preset_names:
             col = box.column(align=True)
             for name in preset_names:
+                builtin = rt.is_builtin_preset(name)
                 row2 = col.row(align=True)
-                op_load = row2.operator("kimodo.load_preset",   text=name, icon='IMPORT')
+                op_load = row2.operator(
+                    "kimodo.load_preset", text=name,
+                    icon='LOCKED' if builtin else 'IMPORT')
                 op_load.preset_name = name
-                op_del  = row2.operator("kimodo.delete_preset", text="",   icon='TRASH')
-                op_del.preset_name = name
+                if not builtin:
+                    op_del = row2.operator("kimodo.delete_preset", text="", icon='TRASH')
+                    op_del.preset_name = name
 
         # File export / import
         row = box.row(align=True)

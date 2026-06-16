@@ -630,6 +630,9 @@ class KIMODO_OT_SavePreset(Operator):
         if not name:
             self.report({'ERROR'}, "Enter a preset name first.")
             return {'CANCELLED'}
+        if rt.is_builtin_preset(name):
+            self.report({'ERROR'}, f"'{name}' is a built-in preset; choose another name.")
+            return {'CANCELLED'}
 
         pairs = [{"src": item.source_bone, "tgt": item.target_bone,
                   "en": item.enabled, "mode": item.retarget_mode}
@@ -678,6 +681,9 @@ class KIMODO_OT_DeletePreset(Operator):
     def execute(self, context):
         prefs = context.preferences.addons[__package__].preferences
         name = self.preset_name
+        if rt.is_builtin_preset(name):
+            self.report({'WARNING'}, "Built-in presets can't be deleted.")
+            return {'CANCELLED'}
         try:
             presets = json.loads(prefs.saved_presets)
             if name in presets:

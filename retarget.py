@@ -81,6 +81,38 @@ _SMPLX_EXTRA_HINTS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Built-in bone map presets
+# ---------------------------------------------------------------------------
+#
+# Permanent presets that ship with the addon for common rigs.  Unlike user
+# presets (stored as JSON in addon preferences), these live in code and cannot
+# be overwritten or deleted from the UI.  Add new rigs here as new entries.
+
+# Kimodo SOMA source bone -> Mixamo target bone.  Mixamo prefixes every bone
+# with "mixamorig:" but otherwise uses the same names as our SOMA skeleton, so
+# we derive the mapping straight from the SOMA hint table to avoid drift.
+_MIXAMO_BONE_PAIRS = [
+    (src_name, "mixamorig:" + src_name)
+    for src_name, _alts in _SOMA_BONE_MAP_HINTS
+]
+
+
+def _build_mixamo_pairs(mode: str) -> list[dict]:
+    """Build Mixamo preset bone pairs in the standard preset dict format."""
+    return [
+        {"src": src, "tgt": tgt, "en": True, "mode": mode}
+        for src, tgt in _MIXAMO_BONE_PAIRS
+    ]
+
+
+# Registry of built-in presets: display name -> list of bone-pair dicts.
+BUILTIN_PRESETS: "dict[str, list[dict]]" = {
+    "Mixamo (Child Of)":      _build_mixamo_pairs("CHILD_OF"),
+    "Mixamo (Copy Rotation)": _build_mixamo_pairs("COPY_ROTATION"),
+}
+
+
 def _normalize(name: str) -> str:
     """Lowercase, strip prefix up to ':', remove non-alphanumeric."""
     name = name.lower()
@@ -328,9 +360,16 @@ def bake_retargeted_animation(
 # Preset save / load
 # ---------------------------------------------------------------------------
 
+def is_builtin_preset(preset_name: str) -> bool:
+    """True if the name refers to a permanent, ship-with-the-addon preset."""
+    return preset_name in BUILTIN_PRESETS
+
+
 def save_preset(prefs, preset_name: str, bone_pairs: list[dict]) -> None:
-    """Save bone mapping to addon preferences."""
+    """Save bone mapping to addon preferences. Built-ins are never written."""
     import json
+    if is_builtin_preset(preset_name):
+        return
     try:
         presets = json.loads(prefs.saved_presets)
     except Exception:
@@ -340,8 +379,12 @@ def save_preset(prefs, preset_name: str, bone_pairs: list[dict]) -> None:
 
 
 def load_preset(prefs, preset_name: str) -> list[dict] | None:
-    """Load bone mapping from addon preferences. Returns None if not found."""
+    """Load bone mapping. Checks built-ins first, then user presets.
+    Returns None if not found."""
     import json
+    if preset_name in BUILTIN_PRESETS:
+        # Return a copy so callers can't mutate the registry.
+        return [dict(p) for p in BUILTIN_PRESETS[preset_name]]
     try:
         presets = json.loads(prefs.saved_presets)
         return presets.get(preset_name)
@@ -350,9 +393,12 @@ def load_preset(prefs, preset_name: str) -> list[dict] | None:
 
 
 def list_presets(prefs) -> list[str]:
-    """Returns list of saved preset names."""
+    """Returns preset names: built-ins first, then user presets."""
     import json
     try:
-        return list(json.loads(prefs.saved_presets).keys())
+        user_names = list(json.loads(prefs.saved_presets).keys())
     except Exception:
-        return []
+        user_names = []
+    # Built-ins always listed first; user presets can't shadow a built-in name.
+    user_names = [n for n in user_names if n not in BUILTIN_PRESETS]
+    return list(BUILTIN_PRESETS.keys()) + user_names
