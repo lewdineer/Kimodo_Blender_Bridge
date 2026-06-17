@@ -59,7 +59,8 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.separator(factor=0.3)
                 box.label(text="No compatible Python was found on your system.")
                 box.separator(factor=0.3)
-                box.label(text="Option A — point to an existing Python 3.10–3.12:", icon='FILEBROWSER')
+                box.label(text="Select your Python 3.10–3.12 executable:", icon='FILEBROWSER')
+                box.label(text="  e.g. /usr/bin/python3.12  or  C:\\Python312\\python.exe", icon='BLANK1')
                 try:
                     prefs = context.preferences.addons[__package__].preferences
                     box.prop(prefs, "system_python_override", text="")
@@ -104,9 +105,10 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 token_row = box.row(align=True)
                 token_row.label(text="HF Token (optional):", icon='LOCKED')
                 token_row.prop(prefs, "hf_token", text="")
-                py_row = box.row(align=True)
-                py_row.label(text="Python 3.10–3.12 (optional):", icon='CONSOLE')
-                py_row.prop(prefs, "system_python_override", text="")
+                col2 = box.column(align=True)
+                col2.label(text="Python 3.10–3.12 executable (if not on PATH):", icon='CONSOLE')
+                col2.label(text="  Select the python3.12 / python.exe file directly", icon='BLANK1')
+                col2.prop(prefs, "system_python_override", text="")
             except Exception:
                 pass
             row = box.row()

@@ -443,7 +443,8 @@ class KIMODO_AddonPreferences(AddonPreferences):
     system_python_override: StringProperty(
         name="System Python",
         description=(
-            "Path to a Python 3.10–3.12 executable to use when creating the Kimodo venv. "
+            "Path to the Python 3.10–3.12 executable (python3.12 / python.exe) used to "
+            "create the Kimodo venv. Select the executable file, not a folder. "
             "Leave blank to auto-detect from PATH."
         ),
         default="",
