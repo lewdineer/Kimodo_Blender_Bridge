@@ -455,12 +455,31 @@ def _patch_wrapper(wrapper_path: str, local_dir: str) -> None:
 # Background install thread
 # ---------------------------------------------------------------------------
 
-def _do_install(hf_token: str = "") -> None:
+def _do_install(hf_token: str = "", system_python: str = "") -> None:
     global _state
     try:
         # 1 — Find a system Python ≥ 3.10
-        _log("Searching for system Python 3.10+…")
-        sys_py = _find_system_python()
+        sys_py = ""
+        if system_python and os.path.isfile(system_python):
+            _log(f"Validating user-specified Python: {system_python}")
+            try:
+                r = subprocess.run(
+                    [system_python, "-c",
+                     "import sys; v=sys.version_info; print(v.major, v.minor)"],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=5, **_NO_WINDOW,
+                )
+                parts = r.stdout.strip().split()
+                if len(parts) == 2 and int(parts[0]) == 3 and int(parts[1]) >= 10:
+                    sys_py = system_python
+                    _log(f"Using user-specified Python: {sys_py}")
+                else:
+                    _log(f"User-specified Python failed version check: {r.stdout.strip()!r}")
+            except Exception as exc:
+                _log(f"User-specified Python could not be run: {exc}")
+        if not sys_py:
+            _log("Searching for system Python 3.10+…")
+            sys_py = _find_system_python()
         if not sys_py:
             with _lock:
                 _state["needs_python"] = True
@@ -699,16 +718,17 @@ class KIMODO_OT_InstallKimodo(Operator):
             _state.update(running=True, lines=[], error="", done=False,
                           needs_python=False, dl_progress=0.0, dl_label="")
 
-        # Read the HF token on the main thread — preferences are not safe to
-        # access from background threads.
+        # Read preferences on the main thread — not safe from background threads.
         hf_token = ""
+        system_python = ""
         try:
             prefs = context.preferences.addons[__package__].preferences
             hf_token = (prefs.hf_token or "").strip()
+            system_python = (prefs.system_python_override or "").strip()
         except Exception:
             pass
 
-        threading.Thread(target=_do_install, args=(hf_token,), daemon=True).start()
+        threading.Thread(target=_do_install, args=(hf_token, system_python), daemon=True).start()
 
         # Keep the N-panel refreshing while the install runs
         def _redraw():

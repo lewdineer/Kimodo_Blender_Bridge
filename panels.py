@@ -58,6 +58,15 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.label(text="Python 3.10–3.12 required!", icon='ERROR')
                 box.separator(factor=0.3)
                 box.label(text="No compatible Python was found on your system.")
+                box.separator(factor=0.3)
+                box.label(text="Option A — point to an existing Python 3.10–3.12:", icon='FILEBROWSER')
+                try:
+                    prefs = context.preferences.addons[__package__].preferences
+                    box.prop(prefs, "system_python_override", text="")
+                except Exception:
+                    pass
+                box.separator(factor=0.3)
+                box.label(text="Option B — install Python from python.org:", icon='URL')
                 box.label(text="Click below to download the Python 3.12 installer (Windows 64-bit).")
                 box.label(text='Run it, tick "Add Python to PATH".')
                 box.label(text="On Windows: run the installer as Administrator.")
@@ -95,6 +104,9 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 token_row = box.row(align=True)
                 token_row.label(text="HF Token (optional):", icon='LOCKED')
                 token_row.prop(prefs, "hf_token", text="")
+                py_row = box.row(align=True)
+                py_row.label(text="Python 3.10–3.12 (optional):", icon='CONSOLE')
+                py_row.prop(prefs, "system_python_override", text="")
             except Exception:
                 pass
             row = box.row()
