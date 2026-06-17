@@ -110,7 +110,7 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             try:
                 prefs = context.preferences.addons[__package__].preferences
                 token_row = box.row(align=True)
-                token_row.label(text="HF Token (optional):", icon='LOCKED')
+                token_row.label(text="HF Token (optional, create one on https://huggingface.co/ if download stalls):", icon='LOCKED')
                 token_row.prop(prefs, "hf_token", text="")
                 box.label(text="Python 3.10–3.12 executable (Please select it manually if install fails):",
                           icon='CONSOLE')
