@@ -18,6 +18,11 @@ CHILD_OF        Full parent-child relationship via a Child Of constraint.
                 a rest-pose offset.  Best for floating / weapon bones or
                 when you want exact world-space tracking.
 
+CHILD_OF_ROTATION  Same as CHILD_OF but with only the rotation channels
+                enabled (location and scale are left off).  Useful when you
+                want the parent-child rotation tracking without inheriting
+                the source bone's position.
+
 Baking
 -------
 Blender's NLA bake (visual_keying=True) is used to push the constraint-
@@ -146,15 +151,19 @@ def auto_build_mapping(source_arm: bpy.types.Object,
 def apply_retargeting_constraints(
     source_arm: bpy.types.Object,
     target_arm: bpy.types.Object,
-    bone_pairs: "list[tuple[str, str, bool, str]]",  # (src, tgt, enabled, mode)
+    bone_pairs: "list[tuple]",  # (src, tgt, enabled, mode[, inherit_rotation])
     root_bone: str = "",
 ) -> "tuple[int, list[str]]":
     """
     Add retargeting constraints to each enabled bone pair.
     Returns (n_applied, [warning_messages]).
 
-    bone_pairs tuples: (source_bone, target_bone, enabled, retarget_mode)
+    bone_pairs tuples: (source_bone, target_bone, enabled, retarget_mode
+                        [, inherit_rotation])
     retarget_mode:  'COPY_ROTATION' | 'COPY_TRANSFORMS' | 'CHILD_OF'
+                    | 'CHILD_OF_ROTATION'
+    inherit_rotation (optional bool): when provided, sets the target bone's
+                    'Inherit Rotation' (use_inherit_rotation) property.
     """
     source_arm.hide_viewport = False
     target_arm.hide_viewport = False
@@ -164,8 +173,12 @@ def apply_retargeting_constraints(
     warnings = []
 
     for entry in bone_pairs:
-        # Accept both 3-tuples (legacy) and 4-tuples (with mode)
-        if len(entry) == 4:
+        # Accept 3-tuples (legacy), 4-tuples (with mode) and 5-tuples
+        # (with an inherit-rotation override).
+        inherit_rotation = None
+        if len(entry) == 5:
+            src_name, tgt_name, enabled, mode, inherit_rotation = entry
+        elif len(entry) == 4:
             src_name, tgt_name, enabled, mode = entry
         else:
             src_name, tgt_name, enabled = entry
@@ -182,6 +195,12 @@ def apply_retargeting_constraints(
             warnings.append(f"Source bone '{src_name}' not in Kimodo armature — skipped.")
             continue
 
+        # Apply the per-bone 'Inherit Rotation' override on the armature data.
+        if inherit_rotation is not None:
+            data_bone = target_arm.data.bones.get(tgt_name)
+            if data_bone is not None:
+                data_bone.use_inherit_rotation = inherit_rotation
+
         # Clear previous Kimodo constraints on this bone
         for c in list(tgt_pbone.constraints):
             if c.name.startswith(CONSTRAINT_PREFIX):
@@ -197,6 +216,9 @@ def apply_retargeting_constraints(
 
         elif mode == "CHILD_OF":
             _add_child_of(tgt_pbone, source_arm, src_name)
+
+        elif mode == "CHILD_OF_ROTATION":
+            _add_child_of(tgt_pbone, source_arm, src_name, rotation_only=True)
 
         else:
             warnings.append(f"Unknown retarget mode '{mode}' for '{tgt_name}' — using Copy Rotation.")
@@ -240,20 +262,26 @@ def _add_copy_transforms(pbone, source_arm, src_name: str) -> None:
     ct.target_space = 'LOCAL'
 
 
-def _add_child_of(pbone, source_arm, src_name: str) -> None:
+def _add_child_of(pbone, source_arm, src_name: str, rotation_only: bool = False) -> None:
     """
     Child Of constraint with the inverse matrix set automatically.
     Equivalent to clicking 'Set Inverse' in the UI: stores the inverse of
     the source bone's current world matrix so the target bone doesn't jump
     when the constraint activates.
+
+    When *rotation_only* is True, only the rotation channels are enabled —
+    location and scale are left off so the target bone tracks the source
+    bone's rotation without inheriting its position.
     """
+    use_location = not rotation_only
+
     co = pbone.constraints.new("CHILD_OF")
-    co.name           = CONSTRAINT_PREFIX + "ChildOf"
+    co.name           = CONSTRAINT_PREFIX + ("ChildOfRotation" if rotation_only else "ChildOf")
     co.target         = source_arm
     co.subtarget      = src_name
-    co.use_location_x = True
-    co.use_location_y = True
-    co.use_location_z = True
+    co.use_location_x = use_location
+    co.use_location_y = use_location
+    co.use_location_z = use_location
     co.use_rotation_x = True
     co.use_rotation_y = True
     co.use_rotation_z = True

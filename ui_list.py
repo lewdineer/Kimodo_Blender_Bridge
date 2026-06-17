@@ -8,9 +8,10 @@ from bpy.types import UIList
 
 
 _MODE_ICONS = {
-    "COPY_ROTATION":   'CON_ROTLIKE',
-    "COPY_TRANSFORMS": 'CON_TRANSLIKE',
-    "CHILD_OF":        'CON_CHILDOF',
+    "COPY_ROTATION":      'CON_ROTLIKE',
+    "COPY_TRANSFORMS":    'CON_TRANSLIKE',
+    "CHILD_OF":           'CON_CHILDOF',
+    "CHILD_OF_ROTATION":  'CON_CHILDOF',
 }
 
 
@@ -46,6 +47,10 @@ class KIMODO_UL_BoneMappings(UIList):
 
             mode_icon = _MODE_ICONS.get(item.retarget_mode, 'CON_ROTLIKE')
             sub.prop(item, "retarget_mode", text="", icon=mode_icon)
+
+            # Per-bone 'Inherit Rotation' override toggle (linked = inherits).
+            sub.prop(item, "inherit_rotation", text="", toggle=True,
+                     icon='LINKED' if item.inherit_rotation else 'UNLINKED')
 
         elif self.layout_type == 'GRID':
             layout.alignment = 'CENTER'

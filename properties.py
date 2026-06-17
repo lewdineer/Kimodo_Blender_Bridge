@@ -173,6 +173,19 @@ class KIMODO_HistoryEntry(PropertyGroup):
 # Bone mapping item (one row in the UIList)
 # ---------------------------------------------------------------------------
 
+def _on_inherit_rotation_update(self, context):
+    """Push this entry's inherit-rotation override onto the target bone immediately."""
+    arm = context.scene.kimodo.target_armature
+    if not arm or not self.target_bone:
+        return
+    bone = arm.data.bones.get(self.target_bone)
+    if bone is not None:
+        try:
+            bone.use_inherit_rotation = self.inherit_rotation
+        except Exception:
+            pass
+
+
 class KIMODO_BoneMappingItem(PropertyGroup):
     """A single source → target bone pair for retargeting."""
     source_bone: StringProperty(
@@ -197,8 +210,19 @@ class KIMODO_BoneMappingItem(PropertyGroup):
             ("COPY_ROTATION",    "Copy Rotation",    "Copy only rotation; root bone also gets Copy Location"),
             ("COPY_TRANSFORMS",  "Copy Transforms",  "Copy location + rotation + scale together"),
             ("CHILD_OF",         "Child Of",         "Full parent-child relationship; preserves rest-pose offset"),
+            ("CHILD_OF_ROTATION", "Child Of (Rotation)", "Child Of constraint with only rotation enabled (no location or scale)"),
         ],
         default="CHILD_OF",
+    )
+    inherit_rotation: BoolProperty(
+        name="Inherit Rotation",
+        description=(
+            "Override the target bone's 'Inherit Rotation' property. When unchecked, "
+            "this bone will not inherit rotation from its parent. Applied immediately "
+            "on toggle and again when you click Apply Constraints"
+        ),
+        default=True,
+        update=_on_inherit_rotation_update,
     )
 
 
@@ -449,6 +473,17 @@ class KIMODO_AddonPreferences(AddonPreferences):
         ),
         default="",
         subtype='FILE_PATH',   # renders as text field + file-browser button in Blender
+    )
+
+    install_location: StringProperty(
+        name="Install Location",
+        description=(
+            "Folder where the Kimodo virtual environment is created and looked for. "
+            "Stored in the addon preferences so it is remembered across Blender "
+            "restarts and scenes. Leave blank to use the default ~/.kimodo-venv."
+        ),
+        default="",
+        subtype='DIR_PATH',
     )
 
 
