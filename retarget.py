@@ -18,6 +18,11 @@ CHILD_OF        Full parent-child relationship via a Child Of constraint.
                 a rest-pose offset.  Best for floating / weapon bones or
                 when you want exact world-space tracking.
 
+CHILD_OF_ROTATION  Same as CHILD_OF but with only the rotation channels
+                enabled (location and scale are left off).  Useful when you
+                want the parent-child rotation tracking without inheriting
+                the source bone's position.
+
 Baking
 -------
 Blender's NLA bake (visual_keying=True) is used to push the constraint-
@@ -198,6 +203,9 @@ def apply_retargeting_constraints(
         elif mode == "CHILD_OF":
             _add_child_of(tgt_pbone, source_arm, src_name)
 
+        elif mode == "CHILD_OF_ROTATION":
+            _add_child_of(tgt_pbone, source_arm, src_name, rotation_only=True)
+
         else:
             warnings.append(f"Unknown retarget mode '{mode}' for '{tgt_name}' — using Copy Rotation.")
             _add_copy_rotation(tgt_pbone, source_arm, src_name, is_root)
@@ -240,20 +248,26 @@ def _add_copy_transforms(pbone, source_arm, src_name: str) -> None:
     ct.target_space = 'LOCAL'
 
 
-def _add_child_of(pbone, source_arm, src_name: str) -> None:
+def _add_child_of(pbone, source_arm, src_name: str, rotation_only: bool = False) -> None:
     """
     Child Of constraint with the inverse matrix set automatically.
     Equivalent to clicking 'Set Inverse' in the UI: stores the inverse of
     the source bone's current world matrix so the target bone doesn't jump
     when the constraint activates.
+
+    When *rotation_only* is True, only the rotation channels are enabled —
+    location and scale are left off so the target bone tracks the source
+    bone's rotation without inheriting its position.
     """
+    use_location = not rotation_only
+
     co = pbone.constraints.new("CHILD_OF")
-    co.name           = CONSTRAINT_PREFIX + "ChildOf"
+    co.name           = CONSTRAINT_PREFIX + ("ChildOfRotation" if rotation_only else "ChildOf")
     co.target         = source_arm
     co.subtarget      = src_name
-    co.use_location_x = True
-    co.use_location_y = True
-    co.use_location_z = True
+    co.use_location_x = use_location
+    co.use_location_y = use_location
+    co.use_location_z = use_location
     co.use_rotation_x = True
     co.use_rotation_y = True
     co.use_rotation_z = True

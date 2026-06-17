@@ -8,9 +8,10 @@ from bpy.types import UIList
 
 
 _MODE_ICONS = {
-    "COPY_ROTATION":   'CON_ROTLIKE',
-    "COPY_TRANSFORMS": 'CON_TRANSLIKE',
-    "CHILD_OF":        'CON_CHILDOF',
+    "COPY_ROTATION":      'CON_ROTLIKE',
+    "COPY_TRANSFORMS":    'CON_TRANSLIKE',
+    "CHILD_OF":           'CON_CHILDOF',
+    "CHILD_OF_ROTATION":  'CON_CHILDOF',
 }
 
 

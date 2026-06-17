@@ -197,6 +197,7 @@ class KIMODO_BoneMappingItem(PropertyGroup):
             ("COPY_ROTATION",    "Copy Rotation",    "Copy only rotation; root bone also gets Copy Location"),
             ("COPY_TRANSFORMS",  "Copy Transforms",  "Copy location + rotation + scale together"),
             ("CHILD_OF",         "Child Of",         "Full parent-child relationship; preserves rest-pose offset"),
+            ("CHILD_OF_ROTATION", "Child Of (Rotation)", "Child Of constraint with only rotation enabled (no location or scale)"),
         ],
         default="CHILD_OF",
     )
