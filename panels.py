@@ -82,6 +82,13 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.label(text="Installation incomplete", icon='ERROR')
                 if so.install_status():
                     box.label(text=so.install_status(), icon='BLANK1')
+                try:
+                    prefs = context.preferences.addons[__package__].preferences
+                    box.label(text="Install location (blank = default ~/.kimodo-venv):",
+                              icon='FILE_FOLDER')
+                    box.prop(prefs, "install_location", text="")
+                except Exception:
+                    pass
             box.operator("kimodo.install_kimodo",
                          text="Retry Install", icon='FILE_REFRESH')
             box.operator("kimodo.reset_venv",
@@ -98,7 +105,7 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.separator(factor=0.3)
             else:
                 box.label(text="Kimodo not installed", icon='INFO')
-            box.label(text="Installs to:  ~/.kimodo-venv/")
+            box.label(text=f"Installs to:  {so.managed_venv()}")
             box.label(text="Requires:  Python 3.10 - 3.12, ~8 GB disk, internet")
             try:
                 prefs = context.preferences.addons[__package__].preferences
@@ -110,6 +117,9 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.label(text="Select the python3.12 / python.exe file directly",
                           icon='BLANK1')
                 box.prop(prefs, "system_python_override", text="")
+                box.label(text="Install location (blank = default ~/.kimodo-venv):",
+                          icon='FILE_FOLDER')
+                box.prop(prefs, "install_location", text="")
             except Exception:
                 pass
             row = box.row()

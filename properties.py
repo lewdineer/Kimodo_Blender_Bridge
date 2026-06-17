@@ -451,6 +451,17 @@ class KIMODO_AddonPreferences(AddonPreferences):
         subtype='FILE_PATH',   # renders as text field + file-browser button in Blender
     )
 
+    install_location: StringProperty(
+        name="Install Location",
+        description=(
+            "Folder where the Kimodo virtual environment is created and looked for. "
+            "Stored in the addon preferences so it is remembered across Blender "
+            "restarts and scenes. Leave blank to use the default ~/.kimodo-venv."
+        ),
+        default="",
+        subtype='DIR_PATH',
+    )
+
 
 # ---------------------------------------------------------------------------
 # Registration

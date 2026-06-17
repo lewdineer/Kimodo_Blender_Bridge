@@ -16,6 +16,7 @@ from bpy.props import StringProperty, BoolProperty, IntProperty
 from . import subprocess_client as sc
 from . import retarget as rt
 from . import constraints as cmod
+from . import setup_operator as so
 
 
 # ---------------------------------------------------------------------------
@@ -177,9 +178,19 @@ class KIMODO_OT_StartKimodo(Operator):
         s.is_connected      = False
         s.connection_status = "Starting…"
 
+        # Resolve the Python hint on the main thread. When the scene has no
+        # explicit path, fall back to the remembered managed-venv location
+        # (addon preference) so a fresh scene still finds the install.
+        python_hint = (s.python_executable or "").strip()
+        if not python_hint:
+            try:
+                python_hint = so.managed_python()
+            except Exception:
+                python_hint = ""
+
         self._thread = threading.Thread(
             target=self._run_start,
-            args=(s.python_executable, s.kimodo_model),
+            args=(python_hint, s.kimodo_model),
             daemon=True,
         )
         self._thread.start()

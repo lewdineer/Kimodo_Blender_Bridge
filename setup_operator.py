@@ -81,13 +81,52 @@ def _build_env(extra: "dict | None" = None) -> dict:
         env.update(extra)
     return env
 
-MANAGED_VENV        = os.path.join(os.path.expanduser("~"), ".kimodo-venv")
-LLMVEC_DIR          = os.path.join(MANAGED_VENV, "llm2vec-model")
+# Default venv location. The actual location is overridable via the
+# 'install_location' addon preference (see managed_venv()), which persists
+# across Blender restarts and scenes.
+_DEFAULT_VENV_NAME  = ".kimodo-venv"
 LLMVEC_MODEL_ID     = "Aero-Ex/KIMODO-Meta3_llm2vec_NF4"
+# Names of the per-venv marker / model dir, resolved relative to the venv root
+# (so detection still works for a relocated or custom-located venv).
+_LLMVEC_NAME        = "llm2vec-model"
 # Written at the very end of a successful install; absence means partial/broken.
-_SENTINEL           = os.path.join(MANAGED_VENV, ".kimodo_install_complete")
-# Placeholder string in Aero-Ex's llm2vec_wrapper.py that we replace with LLMVEC_DIR
+_SENTINEL_NAME      = ".kimodo_install_complete"
+# Placeholder string in Aero-Ex's llm2vec_wrapper.py that we replace with the model dir
 _WRAPPER_PLACEHOLDER = "path_to_your_Llama_text-encoders"
+
+
+def _default_venv() -> str:
+    """Return the default ~/.kimodo-venv location."""
+    return os.path.join(os.path.expanduser("~"), _DEFAULT_VENV_NAME)
+
+
+def managed_venv() -> str:
+    """Return the configured Kimodo venv location, or the default.
+
+    Reads the 'install_location' addon preference so the user's custom path is
+    remembered across Blender restarts and scenes. Falls back to
+    ~/.kimodo-venv when unset or unavailable.
+
+    Reads bpy.context — only call from the main thread (panel draw / operator
+    execute). Background threads must use the install dir passed into them.
+    """
+    try:
+        prefs = bpy.context.preferences.addons[__package__].preferences
+        loc = (prefs.install_location or "").strip()
+        if loc:
+            return os.path.abspath(bpy.path.abspath(os.path.expanduser(loc)))
+    except Exception:
+        pass
+    return _default_venv()
+
+
+def _venv_python(venv: str) -> str:
+    """Return the python executable inside *venv*, or '' if not present."""
+    for rel in ("bin/python3", "bin/python", "Scripts/python.exe"):
+        p = os.path.join(venv, rel)
+        if os.path.isfile(p):
+            return p
+    return ""
 
 # ---------------------------------------------------------------------------
 # Install state  (module-level; panels poll this via a redraw timer)
@@ -162,11 +201,7 @@ def needs_python() -> bool:
 
 def managed_python() -> str:
     """Return path to the managed-venv Python, or '' if not present."""
-    for rel in ("bin/python3", "bin/python", "Scripts/python.exe"):
-        p = os.path.join(MANAGED_VENV, rel)
-        if os.path.isfile(p):
-            return p
-    return ""
+    return _venv_python(managed_venv())
 
 
 def venv_root_for(python_exe: str) -> str:
@@ -193,14 +228,14 @@ def is_kimodo_venv(python_exe: str) -> bool:
     return (
         bool(root)
         and os.path.isfile(python_exe)
-        and os.path.isfile(os.path.join(root, os.path.basename(_SENTINEL)))
+        and os.path.isfile(os.path.join(root, _SENTINEL_NAME))
     )
 
 
 def llmvec_dir_for(python_exe: str) -> str:
     """Path to the llm2vec model dir relative to the selected venv ('' if none)."""
     root = venv_root_for(python_exe)
-    return os.path.join(root, os.path.basename(LLMVEC_DIR)) if root else ""
+    return os.path.join(root, _LLMVEC_NAME) if root else ""
 
 
 # Cached GPU presence — panels call has_nvidia_gpu() from draw(), which runs
@@ -257,12 +292,14 @@ def _max_gpu_compute_capability() -> tuple[int, int]:
 
 def venv_exists() -> bool:
     """True if the venv directory is present (even if install is incomplete)."""
-    return os.path.isdir(MANAGED_VENV)
+    return os.path.isdir(managed_venv())
 
 
 def is_installed() -> bool:
     """True only when the venv has a Python binary AND the install completed."""
-    return bool(managed_python()) and os.path.isfile(_SENTINEL)
+    return bool(managed_python()) and os.path.isfile(
+        os.path.join(managed_venv(), _SENTINEL_NAME)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +473,7 @@ def _download_with_retry(
 def _venv_pip() -> list:
     py = managed_python()
     if not py:
-        raise RuntimeError(f"Venv Python not found in {MANAGED_VENV}")
+        raise RuntimeError(f"Venv Python not found in {managed_venv()}")
     return [py, "-m", "pip"]
 
 
@@ -564,9 +601,16 @@ def _validate_python(python_exe: str) -> bool:
         return False
 
 
-def _do_install(hf_token: str = "", system_python: str = "") -> None:
+def _do_install(hf_token: str = "", system_python: str = "",
+                install_dir: str = "") -> None:
     global _state
     try:
+        # All venv paths are derived from install_dir (resolved on the main
+        # thread and passed in) so this thread never touches bpy.context.
+        venv     = install_dir or _default_venv()
+        llmvec   = os.path.join(venv, _LLMVEC_NAME)
+        sentinel = os.path.join(venv, _SENTINEL_NAME)
+
         # 1 — Find a system Python ≥ 3.10
         sys_py = ""
         if system_python:
@@ -591,14 +635,17 @@ def _do_install(hf_token: str = "", system_python: str = "") -> None:
         _log(f"Found: {sys_py}")
 
         # 2 — Create venv
-        _run([sys_py, "-m", "venv", MANAGED_VENV], "Creating venv")
+        _log(f"Install location: {venv}")
+        os.makedirs(os.path.dirname(venv) or ".", exist_ok=True)
+        _run([sys_py, "-m", "venv", venv], "Creating venv")
 
-        venv_py = managed_python()
+        venv_py = _venv_python(venv)
         if not venv_py:
             raise RuntimeError("Venv was created but Python binary not found.")
+        pip = [venv_py, "-m", "pip"]
 
         # 3 — Upgrade pip
-        _run([*_venv_pip(), "install", "--upgrade", "pip"], "Upgrading pip")
+        _run([*pip, "install", "--upgrade", "pip"], "Upgrading pip")
 
         # 4 — Install PyTorch.
         #     Index selection depends on Python version and GPU compute capability:
@@ -630,7 +677,7 @@ def _do_install(hf_token: str = "", system_python: str = "") -> None:
             cuda_label = "12.1"
         _log(f"Installing PyTorch with CUDA {cuda_label} support — this may take several minutes…")
         _run(
-            [*_venv_pip(), "install", "torch",
+            [*pip, "install", "torch",
              "--index-url", torch_index],
             "Installing PyTorch",
         )
@@ -662,7 +709,7 @@ def _do_install(hf_token: str = "", system_python: str = "") -> None:
                 f"motion_correction-1.0.0-{py_tag}-{py_tag}-{platform_tag}.whl"
             )
             _log(f"Wheel: {wheel_url}")
-            _run([*_venv_pip(), "install", wheel_url], "Installing motion_correction")
+            _run([*pip, "install", wheel_url], "Installing motion_correction")
         else:
             _log("macOS: no pre-built wheel — motion_correction will build from source "
                  "(requires Xcode Command Line Tools)")
@@ -679,7 +726,7 @@ def _do_install(hf_token: str = "", system_python: str = "") -> None:
         #   do not need to be listed here.
         _log("Installing undeclared Kimodo dependencies…")
         _run(
-            [*_venv_pip(), "install",
+            [*pip, "install",
              "bitsandbytes>=0.46.1",
              "safetensors",
              "psutil"],
@@ -694,7 +741,7 @@ def _do_install(hf_token: str = "", system_python: str = "") -> None:
         kimodo_env = os.environ.copy()
         kimodo_env["SKIP_MOTION_CORRECTION_IN_SETUP"] = "1"
         _run(
-            [*_venv_pip(), "install", kimodo_url],
+            [*pip, "install", kimodo_url],
             "Installing Kimodo",
             env=kimodo_env,
         )
@@ -707,7 +754,7 @@ def _do_install(hf_token: str = "", system_python: str = "") -> None:
         viser_url = _github_install_url("nv-tlabs", "kimodo-viser")
         _log(f"Installing kimodo-viser fork via {viser_url}…")
         _run(
-            [*_venv_pip(), "install", viser_url],
+            [*pip, "install", viser_url],
             "Installing kimodo-viser",
         )
 
@@ -725,18 +772,18 @@ def _do_install(hf_token: str = "", system_python: str = "") -> None:
         #     The Aero-Ex fork hosts the model at Aero-Ex/KIMODO-Meta3_llm2vec_NF4
         #     on HuggingFace.  We download it once and point the wrapper at it.
         _log(f"Downloading LLM2Vec model ({LLMVEC_MODEL_ID}) — this may take a while…")
-        os.makedirs(LLMVEC_DIR, exist_ok=True)
+        os.makedirs(llmvec, exist_ok=True)
         _download_with_retry(
             venv_py,
             "Downloading LLM2Vec model",
             repo_id=LLMVEC_MODEL_ID,
-            local_dir=LLMVEC_DIR,
+            local_dir=llmvec,
             hf_token=hf_token,
         )
 
         # 11 — Patch wrapper for fully offline operation
         _log("Patching llm2vec_wrapper.py for offline use…")
-        _patch_wrapper(wrapper, LLMVEC_DIR)
+        _patch_wrapper(wrapper, llmvec)
         _log("Patch applied.")
 
         # 12 — Download Kimodo model weights into the HF cache.
@@ -753,19 +800,24 @@ def _do_install(hf_token: str = "", system_python: str = "") -> None:
             hf_token=hf_token,
         )
 
-        # 13 — Update the addon's Python path on the main thread
+        # 13 — Update the addon's Python path on the main thread, and persist
+        #      the install location to the addon preferences so it is remembered
+        #      across Blender restarts and scenes.
         def _set_path():
             try:
                 for scene in bpy.data.scenes:
                     if not scene.kimodo.python_executable:
                         scene.kimodo.python_executable = venv_py
+                prefs = bpy.context.preferences.addons[__package__].preferences
+                prefs.install_location = venv
+                bpy.ops.wm.save_userpref()
             except Exception:
                 pass
         bpy.app.timers.register(_set_path, first_interval=0.1)
 
         # Mark the install as complete so a partial venv is never mistaken for
         # a successful one after a Blender restart.
-        open(_SENTINEL, "w").close()
+        open(sentinel, "w").close()
 
         with _lock:
             _state["done"] = True
@@ -799,13 +851,16 @@ class KIMODO_OT_InstallKimodo(Operator):
             self.report({"WARNING"}, "Installation is already in progress.")
             return {"CANCELLED"}
 
+        # Resolve the install location on the main thread (reads addon prefs).
+        install_dir = managed_venv()
+
         # Remove any partial venv so we always start clean on a retry.
         # A complete install is guarded by the sentinel file; if that's absent
         # the venv is broken and safe to wipe regardless of session state.
         if venv_exists() and not is_installed():
-            _log(f"Removing partial venv for clean retry: {MANAGED_VENV}")
+            _log(f"Removing partial venv for clean retry: {install_dir}")
             try:
-                shutil.rmtree(MANAGED_VENV)
+                shutil.rmtree(install_dir)
             except Exception as exc:
                 self.report({"ERROR"}, f"Could not remove partial venv: {exc}")
                 return {"CANCELLED"}
@@ -831,7 +886,7 @@ class KIMODO_OT_InstallKimodo(Operator):
 
         threading.Thread(
             target=_do_install,
-            args=(hf_token, system_python),
+            args=(hf_token, system_python, install_dir),
             daemon=True,
         ).start()
 
@@ -856,7 +911,7 @@ class KIMODO_OT_UseInstalledKimodo(Operator):
     def execute(self, context):
         py = managed_python()
         if not py:
-            self.report({"ERROR"}, f"Managed venv not found at {MANAGED_VENV}")
+            self.report({"ERROR"}, f"Managed venv not found at {managed_venv()}")
             return {"CANCELLED"}
         context.scene.kimodo.python_executable = py
         self.report({"INFO"}, f"Python path set to: {py}")
@@ -882,14 +937,15 @@ class KIMODO_OT_ResetVenv(Operator):
         if not venv_exists():
             self.report({"INFO"}, "No venv found — nothing to reset.")
             return {"CANCELLED"}
+        install_dir = managed_venv()
         try:
-            shutil.rmtree(MANAGED_VENV)
+            shutil.rmtree(install_dir)
         except Exception as exc:
             self.report({"ERROR"}, f"Could not remove venv: {exc}")
             return {"CANCELLED"}
         with _lock:
             _state.update(running=False, lines=[], error="", done=False)
-        self.report({"INFO"}, f"Removed {MANAGED_VENV} — ready for a fresh install.")
+        self.report({"INFO"}, f"Removed {install_dir} — ready for a fresh install.")
         return {"FINISHED"}
 
 
