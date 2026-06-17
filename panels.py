@@ -78,7 +78,7 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                          text="Reset Venv", icon='TRASH')
             layout.separator(factor=0.5)
 
-        elif not so.is_installed():
+        elif not so.is_installed() and not so.is_kimodo_venv(s.python_executable):
             box = layout.box()
             has_gpu = so.has_nvidia_gpu()
             if not has_gpu:

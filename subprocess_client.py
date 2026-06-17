@@ -102,6 +102,18 @@ def start(python_exe: str, model_name: str, progress_callback=None) -> "tuple[bo
             return False, f"bridge_server.py not found at: {bridge}"
 
         python = _resolve_python(python_exe)
+
+        # A moved/renamed venv leaves an absolute path baked into
+        # llm2vec_wrapper.py pointing at the old location; generation then
+        # fails with a HuggingFace "Repo id must be in the form…" error.
+        # Repair it in place so a relocated Kimodo venv just works.
+        try:
+            from . import setup_operator as _so
+            if _so.is_kimodo_venv(python):
+                _so.heal_wrapper_path(python)
+        except Exception:
+            pass
+
         _ready  = False
         _busy   = False
         _cancel_requested = False
@@ -406,16 +418,17 @@ def _bridge_env(python_exe: str) -> dict:
     env = os.environ.copy()
     try:
         from . import setup_operator as _so
-        managed = _so.MANAGED_VENV
-        llmvec  = _so.LLMVEC_DIR
+        is_kimodo = _so.is_kimodo_venv(python_exe)
+        llmvec    = _so.llmvec_dir_for(python_exe)
     except ImportError:
-        managed = os.path.join(os.path.expanduser("~"), ".kimodo-venv")
-        llmvec  = os.path.join(managed, "llm2vec-model")
+        # Fallback: derive the venv root relative to the given executable so a
+        # relocated venv still gets offline mode even without setup_operator.
+        d = os.path.dirname(os.path.abspath(python_exe))
+        root = os.path.dirname(d) if os.path.basename(d).lower() in ("bin", "scripts") else d
+        is_kimodo = os.path.isfile(os.path.join(root, ".kimodo_install_complete"))
+        llmvec    = os.path.join(root, "llm2vec-model")
 
-    using_managed = os.path.realpath(python_exe).startswith(
-        os.path.realpath(managed) + os.sep
-    )
-    if using_managed and os.path.isdir(llmvec):
+    if is_kimodo and llmvec and os.path.isdir(llmvec):
         env["TRANSFORMERS_OFFLINE"]  = "1"
         env["HF_DATASETS_OFFLINE"]   = "1"
         env["HF_HUB_OFFLINE"]        = "1"

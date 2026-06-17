@@ -169,6 +169,40 @@ def managed_python() -> str:
     return ""
 
 
+def venv_root_for(python_exe: str) -> str:
+    """Given a python executable inside a venv, return the venv root ('' if none).
+
+    Handles <root>/bin/python3 (POSIX), <root>/Scripts/python.exe (Windows
+    venv) and <root>/python.exe (conda env root).
+    """
+    if not python_exe:
+        return ""
+    d = os.path.dirname(os.path.abspath(python_exe))
+    base = os.path.basename(d).lower()
+    return os.path.dirname(d) if base in ("bin", "scripts") else d
+
+
+def is_kimodo_venv(python_exe: str) -> bool:
+    """True if python_exe points into a completed Kimodo venv.
+
+    Recognises a relocated/copied managed venv by the install sentinel that
+    sits at its root, so detection no longer depends on the hardcoded
+    ~/.kimodo-venv location.
+    """
+    root = venv_root_for(python_exe)
+    return (
+        bool(root)
+        and os.path.isfile(python_exe)
+        and os.path.isfile(os.path.join(root, os.path.basename(_SENTINEL)))
+    )
+
+
+def llmvec_dir_for(python_exe: str) -> str:
+    """Path to the llm2vec model dir relative to the selected venv ('' if none)."""
+    root = venv_root_for(python_exe)
+    return os.path.join(root, os.path.basename(LLMVEC_DIR)) if root else ""
+
+
 # Cached GPU presence — panels call has_nvidia_gpu() from draw(), which runs
 # on every viewport redraw; spawning nvidia-smi there would stall the UI
 # (and flash a console window per redraw on Windows).
@@ -449,6 +483,66 @@ def _patch_wrapper(wrapper_path: str, local_dir: str) -> None:
 
     with open(wrapper_path, "w", encoding="utf-8") as f:
         f.write(patched)
+
+
+def find_wrapper_for(python_exe: str) -> str:
+    """Locate llm2vec_wrapper.py inside the selected venv (no subprocess)."""
+    import glob
+    root = venv_root_for(python_exe)
+    if not root:
+        return ""
+    rel = os.path.join("kimodo", "model", "llm2vec", "llm2vec_wrapper.py")
+    for pat in (
+        os.path.join(root, "lib", "python*", "site-packages", rel),  # POSIX
+        os.path.join(root, "Lib", "site-packages", rel),             # Windows
+    ):
+        hits = glob.glob(pat)
+        if hits:
+            return hits[0]
+    return ""
+
+
+def heal_wrapper_path(python_exe: str) -> bool:
+    """Repair a relocated venv's llm2vec wrapper.
+
+    The installer bakes an absolute path to the llm2vec-model dir into
+    llm2vec_wrapper.py (the ``custom_path = r"…"`` line). If the venv is later
+    moved or renamed, that path breaks; the wrapper then falls back to a
+    non-existent ``models/KIMODO-Meta3_llm2vec_NF4`` dir, and generation fails
+    with a HuggingFace "Repo id must be in the form…" error.
+
+    When the baked path no longer exists, rewrite it to this venv's actual
+    llm2vec-model dir. A still-valid baked path is left untouched so custom
+    setups are not clobbered. Returns True if a change was written.
+    """
+    import re
+    llmvec = llmvec_dir_for(python_exe)
+    if not llmvec or not os.path.isdir(llmvec):
+        return False
+    wrapper = find_wrapper_for(python_exe)
+    if not wrapper:
+        return False
+    try:
+        with open(wrapper, encoding="utf-8") as f:
+            text = f.read()
+    except OSError:
+        return False
+
+    m = re.search(r'(custom_path\s*=\s*r?")([^"]*)(")', text)
+    if not m:
+        return False
+    current = m.group(2)
+    if os.path.isdir(current):
+        return False  # baked path still valid — leave it alone
+
+    safe = llmvec.replace("\\", "\\\\")
+    patched = text[:m.start(2)] + safe + text[m.end(2):]
+    try:
+        with open(wrapper, "w", encoding="utf-8") as f:
+            f.write(patched)
+    except OSError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
