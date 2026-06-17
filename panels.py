@@ -112,7 +112,7 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 token_row = box.row(align=True)
                 token_row.label(text="HF Token (optional):", icon='LOCKED')
                 token_row.prop(prefs, "hf_token", text="")
-                box.label(text="Python 3.10–3.12 executable (if not on PATH):",
+                box.label(text="Python 3.10–3.12 executable (Please select it manually if install fails):",
                           icon='CONSOLE')
                 box.label(text="Select the python3.12 / python.exe file directly",
                           icon='BLANK1')
