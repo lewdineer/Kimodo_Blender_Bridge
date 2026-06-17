@@ -440,6 +440,17 @@ class KIMODO_AddonPreferences(AddonPreferences):
         subtype='PASSWORD',
     )
 
+    system_python_override: StringProperty(
+        name="System Python",
+        description=(
+            "Path to the Python 3.10–3.12 executable (python3.12 / python.exe) used to "
+            "create the Kimodo venv. Select the executable file, not a folder. "
+            "Leave blank to auto-detect from PATH."
+        ),
+        default="",
+        subtype='FILE_PATH',
+    )
+
 
 # ---------------------------------------------------------------------------
 # Registration
