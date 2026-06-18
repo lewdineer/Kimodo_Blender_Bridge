@@ -234,6 +234,14 @@ class KIMODO_SceneSettings(PropertyGroup):
     """Stored on bpy.context.scene.kimodo — all per-scene settings."""
 
     # --- Connection (subprocess bridge) ---
+    show_advanced_connection: BoolProperty(
+        name="Advanced",
+        description=(
+            "Show advanced connection overrides: the Python executable path, "
+            "HuggingFace token, and the Kimodo venv install location"
+        ),
+        default=False,
+    )
     python_executable: StringProperty(
         name="Python",
         description=(

@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "kimodo_blender_bridge"
-version = "1.5.3"
+version = "1.5.4"
 name = "Kimodo Blender Bridge"
 tagline = "Generate human motion with NVIDIA Kimodo AI"
 maintainer = "Lewdineer"

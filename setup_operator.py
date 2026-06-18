@@ -17,6 +17,7 @@ import traceback
 
 import bpy
 from bpy.types import Operator
+from bpy.props import StringProperty, BoolProperty
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -841,15 +842,48 @@ class KIMODO_OT_InstallKimodo(Operator):
     bl_idname      = "kimodo.install_kimodo"
     bl_label       = "Install Kimodo (Auto)"
     bl_description = (
-        "Create ~/.kimodo-venv, install Kimodo from the Aero-Ex offline fork, "
-        "download the LLM2Vec text encoder locally, and configure the addon "
-        "automatically. Requires internet access and ~5–10 GB of disk space."
+        "Choose a folder, then create a Kimodo virtual environment there, install "
+        "Kimodo from the Aero-Ex offline fork, download the LLM2Vec text encoder "
+        "locally, and configure the addon automatically. Requires internet access "
+        "and ~5–10 GB of disk space."
     )
+
+    # Folder chosen in the file browser (populated by fileselect_add). The venv
+    # is created in a "kimodo-venv" subfolder of this directory.
+    directory: StringProperty(subtype='DIR_PATH', options={'SKIP_SAVE'})
+    # Retry buttons set this False so they reuse the already-chosen location
+    # instead of re-opening the folder browser.
+    prompt_location: BoolProperty(default=True, options={'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        # Already running, or an explicit no-prompt retry → straight to execute.
+        if is_installing() or not self.prompt_location:
+            return self.execute(context)
+        # Pre-point the browser at the parent of the current default location.
+        default = managed_venv()
+        parent = os.path.dirname(default) or os.path.expanduser("~")
+        self.directory = parent + os.sep
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
 
     def execute(self, context):
         if is_installing():
             self.report({"WARNING"}, "Installation is already in progress.")
             return {"CANCELLED"}
+
+        # If the user picked a folder in the browser, place the venv in a clearly
+        # named "kimodo-venv" subfolder and persist it to the addon preferences
+        # so managed_venv() and the background thread agree and it survives
+        # Blender restarts.
+        chosen = (self.directory or "").strip()
+        if self.prompt_location and chosen:
+            install_dir = os.path.join(os.path.abspath(bpy.path.abspath(chosen)),
+                                       "kimodo-venv")
+            try:
+                prefs = context.preferences.addons[__package__].preferences
+                prefs.install_location = install_dir
+            except Exception:
+                pass
 
         # Resolve the install location on the main thread (reads addon prefs).
         install_dir = managed_venv()

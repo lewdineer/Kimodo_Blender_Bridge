@@ -89,8 +89,10 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                     box.prop(prefs, "install_location", text="")
                 except Exception:
                     pass
-            box.operator("kimodo.install_kimodo",
-                         text="Retry Install", icon='FILE_REFRESH')
+            # Reuse the already-chosen location on retry — no folder prompt.
+            op = box.operator("kimodo.install_kimodo",
+                              text="Retry Install", icon='FILE_REFRESH')
+            op.prompt_location = False
             box.operator("kimodo.reset_venv",
                          text="Reset Venv", icon='TRASH')
             layout.separator(factor=0.5)
@@ -105,45 +107,29 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.separator(factor=0.3)
             else:
                 box.label(text="Kimodo not installed", icon='INFO')
-            box.label(text=f"Installs to:  {so.managed_venv()}")
             box.label(text="Requires:  Python 3.10 - 3.12, ~8 GB disk, internet")
-            try:
-                prefs = context.preferences.addons[__package__].preferences
-                token_row = box.row(align=True)
-                token_row.label(text="HF Token (optional, create one on https://huggingface.co/ if download stalls):", icon='LOCKED')
-                token_row.prop(prefs, "hf_token", text="")
-                box.label(text="Python 3.10–3.12 executable (Please select it manually if install fails):",
-                          icon='CONSOLE')
-                box.label(text="Select the python 3.10-3.12 / python.exe file directly if install fails",
-                          icon='BLANK1')
-                box.prop(prefs, "system_python_override", text="")
-                box.label(text="Install location (blank = default ~/.kimodo-venv):",
-                          icon='FILE_FOLDER')
-                box.prop(prefs, "install_location", text="")
-            except Exception:
-                pass
+            box.label(text="Click Install, then pick a folder for the Kimodo venv.",
+                      icon='FILE_FOLDER')
             row = box.row()
+            row.scale_y = 1.3
             row.enabled = has_gpu
             row.operator("kimodo.install_kimodo", icon='IMPORT')
+            # Advanced overrides (Python / HF token / explicit install location).
+            self._draw_advanced(box, context, s, show_python=False)
             layout.separator(factor=0.5)
 
         elif not s.python_executable or not os.path.isfile(s.python_executable):
             box = layout.box()
             box.label(text="Kimodo venv ready", icon='CHECKMARK')
             box.operator("kimodo.use_installed_kimodo", icon='CONSOLE')
+            self._draw_advanced(box, context, s, show_python=True)
             layout.separator(factor=0.5)
-
-        # --- Python executable ---
-        col = layout.column(align=True)
-        col.label(text="Kimodo Python:", icon='CONSOLE')
-        row = col.row(align=True)
-        row.prop(s, "python_executable", text="")
-        row.enabled = not running
-
-        col.label(text="  Leave blank to auto-detect from PATH / sibling venv",
-                  icon='INFO')
-
-        layout.separator(factor=0.5)
+        else:
+            # Installed and a Python executable is set — keep overrides one click
+            # away under Advanced instead of always on screen.
+            box = layout.box()
+            self._draw_advanced(box, context, s, show_python=True)
+            layout.separator(factor=0.5)
 
         # --- Model selector ---
         row = layout.row(align=True)
@@ -188,6 +174,46 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             row = layout.row()
             row.alignment = 'RIGHT'
             row.operator("kimodo.reset_venv", text="Delete Venv", icon='TRASH', emboss=False)
+
+    def _draw_advanced(self, box, context, s, show_python=False):
+        """Collapsible Advanced overrides: Python path, HF token, install location.
+
+        Keeps the default Connection view clean while leaving both override
+        capabilities (Python executable + venv install location) one click away.
+        """
+        expanded = s.show_advanced_connection
+        box.prop(
+            s, "show_advanced_connection",
+            text="Advanced",
+            icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT',
+            emboss=False,
+        )
+        if not expanded:
+            return
+
+        col = box.column(align=True)
+        if show_python:
+            col.label(text="Kimodo Python:", icon='CONSOLE')
+            row = col.row(align=True)
+            row.prop(s, "python_executable", text="")
+            row.enabled = not s.is_connected
+            col.label(text="Leave blank to auto-detect from PATH / sibling venv",
+                      icon='INFO')
+            col.separator(factor=0.5)
+
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+            col.label(text="HF Token (optional — set if model downloads stall):",
+                      icon='LOCKED')
+            col.prop(prefs, "hf_token", text="")
+            col.label(text="System Python 3.10–3.12 (override auto-detect):",
+                      icon='CONSOLE')
+            col.prop(prefs, "system_python_override", text="")
+            col.label(text="Install location (blank = default ~/.kimodo-venv):",
+                      icon='FILE_FOLDER')
+            col.prop(prefs, "install_location", text="")
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------

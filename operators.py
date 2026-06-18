@@ -6,6 +6,7 @@ All bpy.ops.kimodo.* operators.
 import bpy
 import addon_utils
 import os
+import math
 import json
 import threading
 import random
@@ -1478,6 +1479,27 @@ class KIMODO_OT_SampleCurveAsWaypoints(Operator):
             self.report({'ERROR'}, "Could not sample any points from the curve.")
             return {'CANCELLED'}
 
+        # Heading per sample: the forward direction of the curve on the
+        # ground plane, so the character walks *along* the path instead of
+        # always facing +Y. Use a forward difference (and the previous
+        # segment for the final point); reuse the last valid angle across any
+        # duplicate/zero-length samples.  angle = atan2(dx, -dy) gives the
+        # heading_angle (consumed by build_constraints_json) that makes the
+        # character face forward along the curve in Kimodo's frame.
+        headings = []
+        last_angle = 0.0
+        n_pos = len(positions)
+        for i in range(n_pos):
+            if i + 1 < n_pos:
+                d = positions[i + 1] - positions[i]      # forward difference
+            elif i > 0:
+                d = positions[i] - positions[i - 1]       # last point: previous segment
+            else:
+                d = None                                  # single point: no direction
+            if d is not None and math.hypot(d.x, d.y) > 1e-6:
+                last_angle = math.atan2(d.x, -d.y)
+            headings.append(last_angle)
+
         start_f = s.path_start_frame
         end_f   = s.path_end_frame
         color   = _CONSTRAINT_COLORS_RGBA['root2d']
@@ -1489,12 +1511,16 @@ class KIMODO_OT_SampleCurveAsWaypoints(Operator):
         for i, pos in enumerate(positions):
             frame = round(start_f + (end_f - start_f) * i / (n - 1)) if n > 1 else start_f
 
+            angle = headings[i]
+
             bpy.ops.object.empty_add(type='ARROWS', location=pos)
             empty = context.active_object
             empty.name = _unique_name(f"Kimodo_Path_{i + 1:02d}")
             empty.color = color
             empty.show_name = True
             empty.empty_display_size = 0.15
+            # Point the arrow empty along the curve so the heading is visible.
+            empty.rotation_euler.z = angle
             empty["kimodo_constraint"] = True
             empty["kimodo_type"]       = 'root2d'
 
@@ -1503,6 +1529,8 @@ class KIMODO_OT_SampleCurveAsWaypoints(Operator):
             item.frame           = frame
             item.marker_object   = empty
             item.enabled         = True
+            item.include_heading = True
+            item.heading_angle   = angle
             item.label           = empty.name
 
         s.constraint_index = len(s.motion_constraints) - 1

@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.5.4] — 2026-06-18
+
+### Added
+
+- **Choose where the Kimodo venv is installed**: *Install Kimodo* now opens a folder browser so you can pick the install location instead of it silently going to `~/.kimodo-venv`. The venv is created in a `kimodo-venv` subfolder of the chosen directory and the choice is saved to the addon preferences (remembered across restarts). *Retry Install* reuses the chosen location without re-prompting.
+
+### Changed
+
+- **Sampled path waypoints now face along the curve**: *Sample Curve as Waypoints* sets each Root waypoint's heading from the curve's forward direction, so the character walks along the drawn path instead of always facing +Y. The arrow empties are rotated to show the heading in the viewport.
+- **Tidier Connection tab**: the Python override, HuggingFace token, and install-location fields moved into a collapsible *Advanced* section for a cleaner default Install → Use → Start flow. Both override capabilities (Python executable path and venv install location) remain available one click away.
+
 ## [1.5.3] — 2026-06-15
 
 ### Fixed
