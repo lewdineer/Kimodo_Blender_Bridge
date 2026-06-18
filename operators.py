@@ -1404,6 +1404,50 @@ def _sample_curve_arc_length(curve_obj, n_samples, depsgraph):
     return samples
 
 
+class KIMODO_OT_DrawFreehandCurve(Operator):
+    """Create a new curve and activate Blender's Draw tool to sketch a path freehand"""
+    bl_idname  = "kimodo.draw_freehand_curve"
+    bl_label   = "Draw Curve"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        s = context.scene.kimodo
+
+        # If we are already in Edit Mode, switch to Object Mode first
+        if context.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+
+        # Create new Bezier Curve data block and object
+        curve_data = bpy.data.curves.new(name="Kimodo_Draw_Path", type='CURVE')
+        curve_data.dimensions = '3D'
+        
+        curve_obj = bpy.data.objects.new(name="Kimodo_Draw_Path", object_data=curve_data)
+        context.scene.collection.objects.link(curve_obj)
+        
+        # Set it active & selected
+        bpy.ops.object.select_all(action='DESELECT')
+        context.view_layer.objects.active = curve_obj
+        curve_obj.select_set(True)
+        
+        # Assign to panel property
+        s.path_curve = curve_obj
+        
+        # Enter edit mode
+        bpy.ops.object.mode_set(mode='EDIT')
+        
+        # Set tool to built-in Draw tool
+        try:
+            bpy.ops.wm.tool_set_by_id(name="builtin.draw")
+            self.report({'INFO'}, "Draw tool active! Sketch a path in the 3D Viewport, then click 'Sample Curve' when done.")
+        except Exception as e:
+            self.report({'WARNING'}, f"Created curve, but could not set active tool: {e}")
+
+        return {'FINISHED'}
+
+
 class KIMODO_OT_SampleCurveAsWaypoints(Operator):
     """Sample a curve into evenly-spaced Root XZ waypoint constraints"""
     bl_idname  = "kimodo.sample_curve_as_waypoints"
@@ -1412,6 +1456,12 @@ class KIMODO_OT_SampleCurveAsWaypoints(Operator):
 
     def execute(self, context):
         s = context.scene.kimodo
+
+        if context.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
 
         if not s.path_curve:
             self.report({'ERROR'}, "Set a curve object in the Path Curve field.")
@@ -2067,6 +2117,7 @@ _classes = [
     KIMODO_OT_ClearHistory,
     KIMODO_OT_GenerateVariations,
     # Curve path operator
+    KIMODO_OT_DrawFreehandCurve,
     KIMODO_OT_SampleCurveAsWaypoints,
     # Constraint operators
     KIMODO_OT_AddConstraint,

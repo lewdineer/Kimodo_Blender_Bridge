@@ -493,7 +493,9 @@ class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
         layout.separator()
         path_box = layout.box()
         path_box.label(text="Sample Curve as Waypoints", icon='CURVE_DATA')
-        path_box.prop(s, "path_curve", text="Curve")
+        split = path_box.split(factor=0.8, align=True)
+        split.prop(s, "path_curve", text="Curve")
+        split.operator("kimodo.draw_freehand_curve", text="Draw", icon='GREASEPENCIL')
         if s.path_curve:
             prow = path_box.row(align=True)
             prow.prop(s, "path_waypoints", text="Points")
