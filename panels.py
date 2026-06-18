@@ -151,6 +151,11 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
         row.prop(s, "kimodo_model", text="")
         row.enabled = not running
 
+        # --- Offload toggle ---
+        row = layout.row(align=True)
+        row.prop(s, "use_offload", text="Enable Memory Offload")
+        row.enabled = not running
+
         layout.separator(factor=0.5)
 
         # --- Start / Stop buttons ---
@@ -213,12 +218,6 @@ class KIMODO_PT_Segments(KIMODO_PanelBase, Panel):
         row = layout.row(align=True)
         row.label(text="Model:")
         row.prop(s, "model_type", expand=True)
-        # Show seed for the selected segment if available
-        if s.motion_segments and 0 <= s.segment_index < len(s.motion_segments):
-            selected_seg = s.motion_segments[s.segment_index]
-            row.prop(selected_seg, "seed", text="Seed")
-        else:
-            row.prop(s, "seed", text="Global Seed")
 
         # --- FPS warning ---
         scene_fps = context.scene.render.fps / context.scene.render.fps_base
@@ -281,8 +280,11 @@ class KIMODO_PT_Segments(KIMODO_PanelBase, Panel):
 
             fps = context.scene.render.fps / context.scene.render.fps_base
             dur = (seg.end_frame - seg.start_frame + 1) / fps
-            col.label(text=f"  {dur:.1f}s · {seg.end_frame - seg.start_frame + 1} frames",
+            
+            row3 = col.row(align=True)
+            row3.label(text=f"  {dur:.1f}s · {seg.end_frame - seg.start_frame + 1} frames",
                       icon='TIME')
+            row3.prop(seg, "seed", text="Seed")
 
 
 
@@ -491,7 +493,9 @@ class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
         layout.separator()
         path_box = layout.box()
         path_box.label(text="Sample Curve as Waypoints", icon='CURVE_DATA')
-        path_box.prop(s, "path_curve", text="Curve")
+        split = path_box.split(factor=0.8, align=True)
+        split.prop(s, "path_curve", text="Curve")
+        split.operator("kimodo.draw_freehand_curve", text="Draw", icon='GREASEPENCIL')
         if s.path_curve:
             prow = path_box.row(align=True)
             prow.prop(s, "path_waypoints", text="Points")

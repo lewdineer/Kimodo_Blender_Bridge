@@ -118,6 +118,25 @@ def _generate(req: dict, model, device: str) -> None:
 
     constraint_lst = _load_constraints(constraints_json, model)
 
+    if getattr(model, "offload_enabled", False) and getattr(model, "text_encoder", None) and type(model.text_encoder).__name__ == "CachedTextEncoder":
+        try:
+            from kimodo.demo.memory_manager import manager as memory_manager
+            prompt_set = {text, "", " "}
+            prompt_set = {p for p in prompt_set if p.strip()}
+            if prompt_set:
+                _out({"status": "progress", "message": "Pre-encoding text prompt (CPU Offload)..."})
+                model.text_encoder.reload()
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                import gc
+                gc.collect()
+                model.text_encoder.prewarm(list(prompt_set))
+                memory_manager.purge_encoder_completely()
+                memory_manager.touch_and_move(model.model_name, device)
+        except Exception as exc:
+            _out({"status": "progress", "message": f"Warning: offload prewarm failed ({exc})"})
+
     _out({"status": "progress",
           "message": f"Running diffusion ({diffusion_steps} steps)…"})
 
@@ -145,6 +164,7 @@ def _generate_multi(req: dict, model, device: str) -> None:
     prompts        = req.get("prompts", [])
     durations      = req.get("durations", [])
     seed           = req.get("seed")
+    seeds          = req.get("seeds")
     output_format  = req.get("output_format", "bvh")
     diffusion_steps = int(req.get("diffusion_steps", 100))
     standard_tpose = bool(req.get("bvh_standard_tpose", False))
@@ -167,6 +187,27 @@ def _generate_multi(req: dict, model, device: str) -> None:
     constraints_json = req.get("constraints_json")
     constraint_lst = _load_constraints(constraints_json, model)
 
+    if getattr(model, "offload_enabled", False) and getattr(model, "text_encoder", None) and type(model.text_encoder).__name__ == "CachedTextEncoder":
+        try:
+            from kimodo.demo.memory_manager import manager as memory_manager
+            prompt_set = set(texts)
+            prompt_set.add("")
+            prompt_set.add(" ")
+            prompt_set = {p for p in prompt_set if p.strip()}
+            if prompt_set:
+                _out({"status": "progress", "message": "Pre-encoding text prompts (CPU Offload)..."})
+                model.text_encoder.reload()
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                import gc
+                gc.collect()
+                model.text_encoder.prewarm(list(prompt_set))
+                memory_manager.purge_encoder_completely()
+                memory_manager.touch_and_move(model.model_name, device)
+        except Exception as exc:
+            _out({"status": "progress", "message": f"Warning: offload prewarm failed ({exc})"})
+
     n = len(texts)
     _out({"status": "progress",
           "message": f"Running multi-prompt diffusion ({n} segments, {diffusion_steps} steps)…"})
@@ -181,6 +222,7 @@ def _generate_multi(req: dict, model, device: str) -> None:
         num_transition_frames=num_transition_frames,
         post_processing=True,
         return_numpy=True,
+        seeds=seeds,
     )
 
     _out({"status": "progress", "message": "Saving combined output file…"})
@@ -200,6 +242,8 @@ def main() -> None:
                         help="Kimodo model name (e.g. Kimodo-SOMA-RP-v1)")
     parser.add_argument("--device", default=None,
                         help="Compute device override (e.g. cuda:0, cpu)")
+    parser.add_argument("--offload", action="store_true",
+                        help="Enable CPU/Disk offloading for low memory")
     args = parser.parse_args()
 
     _out({"status": "loading", "message": "Importing Kimodo…"})
@@ -221,6 +265,21 @@ def main() -> None:
 
     try:
         model = load_model(args.model, device=device)
+        model.model_name = args.model
+        model.offload_enabled = bool(args.offload)
+        
+        if args.offload:
+            try:
+                from kimodo.demo.memory_manager import manager as memory_manager
+                from kimodo.demo.embedding_cache import CachedTextEncoder
+                
+                memory_manager.offload_enabled = True
+                memory_manager.register_model(args.model, model)
+                if hasattr(model, "text_encoder"):
+                    memory_manager.register_encoder(model.text_encoder)
+                    model.text_encoder = CachedTextEncoder(model.text_encoder, model_name=args.model)
+            except Exception as exc:
+                print(f"[Bridge Server] Warning setting up MemoryManager: {exc}", file=sys.stderr)
     except Exception as exc:
         _out({"status": "error",
               "message": f"Model load failed: {exc}\n{traceback.format_exc()}"})

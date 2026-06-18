@@ -85,7 +85,7 @@ def _read_stdout(pipe, q: "queue.Queue") -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def start(python_exe: str, model_name: str, progress_callback=None) -> "tuple[bool, str]":
+def start(python_exe: str, model_name: str, use_offload: bool = False, progress_callback=None) -> "tuple[bool, str]":
     """
     Launch bridge_server.py and block until the model reports ready.
     Must be called from a background thread — model loading takes 1-3 min.
@@ -120,8 +120,11 @@ def start(python_exe: str, model_name: str, progress_callback=None) -> "tuple[bo
         _status = "Launching…"
 
         try:
+            cmd = [python, bridge, "--model", model_name]
+            if use_offload:
+                cmd.append("--offload")
             _proc = subprocess.Popen(
-                [python, bridge, "--model", model_name],
+                cmd,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -374,6 +377,7 @@ def generate_motion_multi(
     num_transition_frames: int = 5,
     bvh_standard_tpose: bool = False,
     progress_callback=None,
+    seeds: "list[int] | None" = None,
 ) -> "tuple[bool, str]":
     """
     Generate a single continuous motion from multiple prompts in one model call.
@@ -389,6 +393,7 @@ def generate_motion_multi(
         "prompts": prompts,
         "durations": durations,
         "seed": seed if seed >= 0 else None,
+        "seeds": seeds,
         "output_format": output_format,
         "constraints_json": constraints_json,
         "diffusion_steps": diffusion_steps,

@@ -253,6 +253,11 @@ class KIMODO_SceneSettings(PropertyGroup):
         ],
         default="Kimodo-SOMA-RP-v1",
     )
+    use_offload: BoolProperty(
+        name="Enable Memory Offload",
+        description="Enable CPU/RAM/VRAM offloading for low-memory GPUs (e.g. <= 8GB)",
+        default=True,
+    )
     connection_status: StringProperty(
         name="Status",
         default="Not started",

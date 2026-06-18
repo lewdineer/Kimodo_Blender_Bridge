@@ -156,11 +156,11 @@ class KIMODO_OT_StartKimodo(Operator):
     _timer  = None
     _thread = None
 
-    def _run_start(self, python_exe: str, model_name: str):
+    def _run_start(self, python_exe: str, model_name: str, use_offload: bool):
         def progress(msg):
             _start_state["message"] = msg
 
-        success, msg = sc.start(python_exe, model_name, progress_callback=progress)
+        success, msg = sc.start(python_exe, model_name, use_offload=use_offload, progress_callback=progress)
         _start_state["success"] = success
         _start_state["message"] = msg
         _start_state["done"]    = True
@@ -190,7 +190,7 @@ class KIMODO_OT_StartKimodo(Operator):
 
         self._thread = threading.Thread(
             target=self._run_start,
-            args=(python_hint, s.kimodo_model),
+            args=(python_hint, s.kimodo_model, s.use_offload),
             daemon=True,
         )
         self._thread.start()
@@ -1150,9 +1150,9 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         prompts   = [seg.prompt for _, seg in ordered]
         durations = [(seg.end_frame - seg.start_frame + 1) / fps for _, seg in ordered]
 
-        # Use the first enabled segment's seed (or random if unset)
-        first_seg = ordered[0][1]
-        seed = first_seg.seed if first_seg.seed >= 0 else random.randint(0, 2**31 - 1)
+        # Resolve seeds for all segments
+        seeds = [seg.seed if seg.seed >= 0 else random.randint(0, 2**31 - 1) for _, seg in ordered]
+        seed = seeds[0]
 
         # Build constraints relative to the start of the combined sequence
         constraints_json, con_err = _build_multi_prompt_constraints(context, self._start_frame)
@@ -1173,7 +1173,7 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         self._thread = threading.Thread(
             target=self._run_all,
             args=(prompts, durations, seed, s.output_format,
-                  constraints_json, s.bvh_standard_tpose, num_transition_frames),
+                  constraints_json, s.bvh_standard_tpose, num_transition_frames, seeds),
             daemon=True,
         )
         self._thread.start()
@@ -1184,7 +1184,7 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         return {'RUNNING_MODAL'}
 
     def _run_all(self, prompts, durations, seed, fmt, constraints_json, bvh_standard_tpose,
-                 num_transition_frames=5):
+                 num_transition_frames=5, seeds=None):
         def progress_cb(msg):
             _generation_state["progress"] = msg
 
@@ -1197,6 +1197,7 @@ class KIMODO_OT_GenerateAllSegments(Operator):
             bvh_standard_tpose=bvh_standard_tpose,
             num_transition_frames=num_transition_frames,
             progress_callback=progress_cb,
+            seeds=seeds,
         )
         _generation_state["success"] = success
         _generation_state["result"]  = result
@@ -1403,6 +1404,50 @@ def _sample_curve_arc_length(curve_obj, n_samples, depsgraph):
     return samples
 
 
+class KIMODO_OT_DrawFreehandCurve(Operator):
+    """Create a new curve and activate Blender's Draw tool to sketch a path freehand"""
+    bl_idname  = "kimodo.draw_freehand_curve"
+    bl_label   = "Draw Curve"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        s = context.scene.kimodo
+
+        # If we are already in Edit Mode, switch to Object Mode first
+        if context.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+
+        # Create new Bezier Curve data block and object
+        curve_data = bpy.data.curves.new(name="Kimodo_Draw_Path", type='CURVE')
+        curve_data.dimensions = '3D'
+        
+        curve_obj = bpy.data.objects.new(name="Kimodo_Draw_Path", object_data=curve_data)
+        context.scene.collection.objects.link(curve_obj)
+        
+        # Set it active & selected
+        bpy.ops.object.select_all(action='DESELECT')
+        context.view_layer.objects.active = curve_obj
+        curve_obj.select_set(True)
+        
+        # Assign to panel property
+        s.path_curve = curve_obj
+        
+        # Enter edit mode
+        bpy.ops.object.mode_set(mode='EDIT')
+        
+        # Set tool to built-in Draw tool
+        try:
+            bpy.ops.wm.tool_set_by_id(name="builtin.draw")
+            self.report({'INFO'}, "Draw tool active! Sketch a path in the 3D Viewport, then click 'Sample Curve' when done.")
+        except Exception as e:
+            self.report({'WARNING'}, f"Created curve, but could not set active tool: {e}")
+
+        return {'FINISHED'}
+
+
 class KIMODO_OT_SampleCurveAsWaypoints(Operator):
     """Sample a curve into evenly-spaced Root XZ waypoint constraints"""
     bl_idname  = "kimodo.sample_curve_as_waypoints"
@@ -1411,6 +1456,12 @@ class KIMODO_OT_SampleCurveAsWaypoints(Operator):
 
     def execute(self, context):
         s = context.scene.kimodo
+
+        if context.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
 
         if not s.path_curve:
             self.report({'ERROR'}, "Set a curve object in the Path Curve field.")
@@ -2066,6 +2117,7 @@ _classes = [
     KIMODO_OT_ClearHistory,
     KIMODO_OT_GenerateVariations,
     # Curve path operator
+    KIMODO_OT_DrawFreehandCurve,
     KIMODO_OT_SampleCurveAsWaypoints,
     # Constraint operators
     KIMODO_OT_AddConstraint,
