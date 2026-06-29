@@ -28,6 +28,7 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
     bl_label    = "⚙  Connection"
     bl_idname   = "KIMODO_PT_Connection"
     bl_order    = 10
+    
 
     def draw(self, context):
         layout = self.layout
@@ -224,6 +225,7 @@ class KIMODO_PT_Segments(KIMODO_PanelBase, Panel):
     bl_label  = "🏞  Motion Segments"
     bl_idname = "KIMODO_PT_Segments"
     bl_order  = 15
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
@@ -343,6 +345,42 @@ class KIMODO_PT_Segments(KIMODO_PanelBase, Panel):
             box2.label(text=s.generation_progress or "Working…", icon='TIME')
             box2.operator("kimodo.cancel_generation", text="Cancel", icon='X')
 
+        # --- Generation History ---
+        layout.separator()
+        hist_header = layout.row(align=True)
+        hist_header.prop(
+            s, "history_expanded",
+            icon='DISCLOSURE_TRI_DOWN' if s.history_expanded else 'DISCLOSURE_TRI_RIGHT',
+            icon_only=True, emboss=False,
+        )
+        hist_header.label(
+            text=f"History ({len(s.generation_history)})", icon='TIME'
+        )
+        if s.history_expanded:
+            if not s.generation_history:
+                layout.label(text="No generations yet.", icon='INFO')
+            else:
+                layout.template_list(
+                    "KIMODO_UL_History", "",
+                    s, "generation_history",
+                    s, "history_index",
+                    rows=min(len(s.generation_history), 5),
+                )
+                if 0 <= s.history_index < len(s.generation_history):
+                    entry = s.generation_history[s.history_index]
+                    detail = layout.box()
+                    detail.label(text=entry.prompt, icon='TEXT')
+                    detail.label(
+                        text=f"Seed: {entry.seed}  |  {entry.duration:.1f}s  |  {entry.timestamp}"
+                    )
+                    op_row = detail.row(align=True)
+                    reimport_op = op_row.operator(
+                        "kimodo.reimport_from_history",
+                        text="Re-import BVH", icon='IMPORT',
+                    )
+                    reimport_op.index = s.history_index
+            layout.operator("kimodo.clear_history", text="Clear History", icon='TRASH')
+
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +390,7 @@ class KIMODO_PT_Segments(KIMODO_PanelBase, Panel):
 class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
     bl_label   = "🎬  Quick Generate"
     bl_idname  = "KIMODO_PT_Generate"
-    bl_order   = 18
+    bl_order   = 14
     bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
@@ -486,6 +524,7 @@ class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
     bl_label   = "🎯  Motion Constraints"
     bl_idname  = "KIMODO_PT_Constraints"
     bl_order   = 25
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
@@ -636,6 +675,7 @@ class KIMODO_PT_Retarget(KIMODO_PanelBase, Panel):
     bl_label   = "🦴  Retarget"
     bl_idname  = "KIMODO_PT_Retarget"
     bl_order   = 30
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
