@@ -1,0 +1,28 @@
+schema_version = "1.0.0"
+
+id = "name_translator"
+version = "1.0.1"
+name = "Name Translator"
+tagline = "Translate model names and keep left and right consistent"
+maintainer = "You <you@example.com>"
+type = "add-on"
+
+tags = ["Object", "Rigging"]
+
+blender_version_min = "4.2.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+[permissions]
+network = "Optional online translation of datablock names"
+files = "Read a custom dictionary and export untranslated terms"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  ".git",
+  "*.zip",
+  "tests/",
+]
