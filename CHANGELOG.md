@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.6.1] — 2026-08-20
+
+### Fixed
+
+- **ARDY could not start: the text encoder was installed without its base weights**: the installer downloaded the two `McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp*` repos and stopped there, but those repos hold only a LoRA adapter (`adapter_model.safetensors`, ~168 MB) plus a config and tokenizer — the ~16 GB of Llama-3 base weights they adapt live in the separate, gated `meta-llama/Meta-Llama-3-8B-Instruct`. The encoder directory therefore looked complete, the install reported success and wrote its sentinel, and *Start ARDY* then died with `OSError: Error no file named model.safetensors, or pytorch_model.bin` from inside transformers — pointing at a folder that plainly did contain a `.safetensors` file, which made the real cause hard to see. The base weights are now downloaded into the adapter's own directory, which is the layout LLM2Vec loads from (it reads the checkpoint from that folder, then applies the adapter from the same folder). Only the shards and their index are taken, so the adapter repo's `config.json` — which carries the `_name_or_path` LLM2Vec reads back to select the Llama-3 prompt template — and its tokenizer are left intact, and the second full copy of the weights that Meta ships under `original/` is not pulled.
+- **A failed encoder download no longer passes as a finished install**: the install now verifies that real base weights are present before writing the completion sentinel, and refuses to finish if all it finds is the adapter. The error names the directory, lists what was actually in it, and names the repo whose download is missing, instead of surfacing twenty minutes later as a stack trace at startup. Because the encoder is gated, a HuggingFace refusal on *any* of the three repos now also reports which repo was refused, alongside the licence and token links.
+
 ## [1.6.0] — 2026-08-20
 
 ### Added

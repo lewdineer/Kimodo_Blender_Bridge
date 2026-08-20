@@ -25,6 +25,7 @@ MODULES = [
     "test_ardy_bvh",
     "test_ardy_bridge",
     "test_addon_registration",
+    "test_ardy_setup",
     "test_panels",
 ]
 

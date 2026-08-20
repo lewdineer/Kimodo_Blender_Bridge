@@ -75,10 +75,42 @@ _ENCODERS_NAME = "text-encoders"
 ARDY_REPO = ("nv-tlabs", "ardy")
 
 # The encoder ARDY's default preset asks for (ardy/model/load_model.py).
+# Both of these hold only a LoRA adapter (adapter_model.safetensors) plus a
+# config and tokenizer — no base weights.
 ENCODER_REPOS = (
     "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp",
     "McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp-supervised",
 )
+
+# ...so the base Llama-3 weights have to come from Meta's gated repo, and they
+# belong in the SAME directory as the adapter.  LLM2Vec loads the pair from one
+# folder — see "special case where config.json and adapter weights are in the
+# same directory" in ardy/model/llm2vec/llm2vec.py — first reading the shards
+# with LlamaBiModel.from_pretrained(dir) and then applying the adapter from
+# that same dir.  This is the step whose absence made the encoder unloadable.
+BASE_MODEL_REPO = "meta-llama/Meta-Llama-3-8B-Instruct"
+
+# Take only the weights.  The adapter repo's own config.json carries
+# _name_or_path = meta-llama/Meta-Llama-3-8B-Instruct, which LLM2Vec reads back
+# to pick the Llama-3 prompt template (llm2vec.py, prepare_for_tokenization),
+# and its tokenizer is the one the encoder expects — neither may be overwritten
+# by the base repo's copies.
+#
+# Named precisely rather than "*.safetensors": the patterns are matched against
+# the whole relative path, so a loose glob would also pull anything the repo
+# keeps in subfolders (Meta ships a second full copy of the weights under
+# original/) and double the download.
+BASE_MODEL_PATTERNS = [
+    "model-*.safetensors",          # the sharded checkpoint
+    "model.safetensors",            # single-file layout, if it ever ships one
+    "model.safetensors.index.json",
+]
+
+# What a directory needs before it can be loaded as a model: either a sharded
+# index, or a single-file checkpoint.  The adapter alone never satisfies this,
+# which is exactly the state a pre-fix install left behind.
+_WEIGHT_MARKERS = ("model.safetensors.index.json", "model.safetensors",
+                   "pytorch_model.bin.index.json", "pytorch_model.bin")
 
 # Only the Core checkpoints suit a character-animation add-on: G1 is a Unitree
 # robot skeleton, and no SOMA checkpoint has been released yet.
@@ -318,6 +350,57 @@ def check_llama_access(token: str) -> "tuple[bool, str]":
 # Source acquisition
 # ---------------------------------------------------------------------------
 
+def _download_encoder(venv_py: str, repo_id: str, local_dir: str,
+                      hf_token: str, allow_patterns: "list[str] | None" = None) -> None:
+    """Fetch one encoder repo, translating a refusal into an actionable error.
+
+    Everything the encoder needs is gated behind Meta-Llama-3-8B-Instruct, so a
+    401/403 here means "your token has no Llama access", not "the network
+    broke" — and it deserves to say so rather than surfacing as a stack trace.
+    """
+    try:
+        _download_with_retry(
+            venv_py, f"Downloading {repo_id.split('/')[-1]}",
+            repo_id=repo_id, local_dir=local_dir, hf_token=hf_token,
+            allow_patterns=allow_patterns,
+        )
+    except RuntimeError as exc:
+        if _looks_gated(str(exc)) or _looks_gated(_recent_log_text()):
+            with _lock:
+                _state["needs_llama_access"] = True
+            raise RuntimeError(
+                f"HuggingFace refused {repo_id}. The ARDY text encoder is "
+                f"gated behind Meta-Llama-3-8B-Instruct: open {LLAMA_MODEL_URL}, "
+                "accept the licence, wait for approval, then paste a token with "
+                f"read access ({HF_TOKEN_URL}) and retry."
+            ) from exc
+        raise
+
+
+def _require_weights(local_dir: str) -> None:
+    """Raise unless *local_dir* holds base weights, not just a LoRA adapter.
+
+    adapter_model.safetensors matches no marker on purpose: a directory with
+    only the adapter is precisely the broken state this guard exists to catch.
+    """
+    try:
+        names = set(os.listdir(local_dir))
+    except OSError as exc:
+        raise RuntimeError(f"Text-encoder directory is unreadable: {exc}") from exc
+
+    if any(marker in names for marker in _WEIGHT_MARKERS):
+        return
+    if any(n.startswith("model-") and n.endswith(".safetensors") for n in names):
+        return
+
+    raise RuntimeError(
+        "The text encoder is missing its base weights: no model.safetensors "
+        f"or shards in {local_dir} (found: {', '.join(sorted(names)) or 'nothing'}). "
+        f"The {BASE_MODEL_REPO} download did not complete — check the log above "
+        "for a HuggingFace refusal, then retry the install."
+    )
+
+
 def _fetch_source(venv_py: str, work_dir: str) -> str:
     """Put the ARDY source tree on disk and return its path.
 
@@ -491,23 +574,21 @@ def _do_install(hf_token: str = "", system_python: str = "",
         for repo_id in ENCODER_REPOS:
             local_dir = os.path.join(encoders, *repo_id.split("/"))
             os.makedirs(local_dir, exist_ok=True)
-            _log(f"Downloading text encoder {repo_id} — this is several GB…")
-            try:
-                _download_with_retry(
-                    venv_py, f"Downloading {repo_id.split('/')[-1]}",
-                    repo_id=repo_id, local_dir=local_dir, hf_token=hf_token,
-                )
-            except RuntimeError as exc:
-                if _looks_gated(str(exc)) or _looks_gated(_recent_log_text()):
-                    with _lock:
-                        _state["needs_llama_access"] = True
-                    raise RuntimeError(
-                        "HuggingFace refused the text-encoder download. This "
-                        "model is gated behind Meta-Llama-3-8B-Instruct: open "
-                        "the model page, accept the licence, wait for approval, "
-                        "then check that your token has read access and retry."
-                    ) from exc
-                raise
+            _log(f"Downloading text-encoder adapter {repo_id}…")
+            _download_encoder(venv_py, repo_id, local_dir, hf_token)
+
+        # 8b — the base weights the adapters are trained against.  They land in
+        #      the adapter's own directory so LLM2Vec finds both together, and
+        #      this is the download that actually needs Llama-3 access.
+        base_dir = os.path.join(encoders, *ENCODER_REPOS[0].split("/"))
+        _log(f"Downloading base weights {BASE_MODEL_REPO} (~16 GB)…")
+        _download_encoder(venv_py, BASE_MODEL_REPO, base_dir, hf_token,
+                          allow_patterns=BASE_MODEL_PATTERNS)
+
+        # Never write the sentinel over an encoder that cannot load: without
+        # this the failure surfaces much later, as an OSError from deep inside
+        # transformers when the bridge starts.
+        _require_weights(base_dir)
 
         # 9 — checkpoint into the HF cache (load_model resolves it from there)
         _log(f"Downloading {DEFAULT_MODEL_REPO} weights…")

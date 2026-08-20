@@ -209,13 +209,30 @@ dependency — so an HF token and an accepted Llama licence would become **manda
 users. The add-on already has an HF-token field, so the UI cost is small; the user-friction
 cost is not.
 
-> **Unverified, worth testing early:** it may be possible to point ARDY at the existing NF4
-> checkpoint. ARDY's wrapper is cleaner than Kimodo's — it honours `TEXT_ENCODERS_DIR`,
-> `HUGGINGFACE_CACHE_DIR` and `TEXT_ENCODER_DEVICE` environment variables
-> (`ardy/model/llm2vec/llm2vec_wrapper.py` :27–41) with **no source patching**, so the
-> `_patch_wrapper()` / `heal_wrapper_path()` hack in `setup_operator.py` would not be needed.
-> Whether a pre-quantized NF4 checkpoint loads through `LLM2Vec.from_pretrained` with
-> `torch_dtype=bfloat16` has **not been tested** and should be the first experiment run.
+**The encoder is two downloads, not one.** Both McGill repos contain *only* a LoRA adapter
+(`adapter_config.json` + `adapter_model.safetensors`, ~168 MB) together with a config and
+tokenizer. The base weights are not in them: they come from the gated
+`meta-llama/Meta-Llama-3-8B-Instruct` (~16 GB) and must land in the **same directory** as the
+adapter, which is the layout `LLM2Vec.from_pretrained` expects — it loads the checkpoint from
+that folder with `LlamaBiModel.from_pretrained(dir)` and then applies the adapter from the same
+folder (see the "special case where config.json and adapter weights are in the same directory"
+branch in `ardy/model/llm2vec/llm2vec.py`). This is what ARDY's README means by requiring Llama
+access, and it is easy to miss: fetching only the McGill repos produces a directory that looks
+complete and fails at load time with `OSError: no file named model.safetensors`.
+
+> **Corrected 2026-08-20.** An earlier revision of this study recommended
+> `TEXT_ENCODERS_DIR` as a "cleaner than `_patch_wrapper()`" way to stage the encoder, and
+> treated the McGill repo as self-contained. The first ARDY install built on that advice shipped
+> without base weights and could not start. `TEXT_ENCODERS_DIR` is also undocumented — it appears
+> only in `ardy/model/llm2vec/llm2vec_wrapper.py` :29–31 and nowhere in ARDY's README or demo — so
+> the layout it expects has to be inferred from the loader. It does work, but only with the base
+> weights alongside the adapter, and the installer now verifies that before declaring success
+> (`ardy_setup.py` `_require_weights()`).
+
+> **Still unverified:** whether the existing ungated NF4 checkpoint can stand in for the gated
+> base weights, which would remove the licence step entirely. `bitsandbytes` is not an ARDY
+> dependency and whether a pre-quantized checkpoint loads through `LLM2Vec.from_pretrained` with
+> `torch_dtype=bfloat16` has not been tested.
 
 **Native extension build.** ARDY's `setup.py` builds `motion_correction` via a
 `CMakeExtension` (:14) on every install, requiring CMake ≥ 3.15 and a C++17 compiler. Crucially

@@ -7,6 +7,7 @@ locally, patches llm2vec_wrapper.py to load it from disk, and sets the
 addon's Python path automatically.
 """
 
+import json
 import os
 import re
 import shutil
@@ -640,28 +641,33 @@ def _download_with_retry(
     repo_id: str,
     local_dir: "str | None" = None,
     hf_token: str = "",
+    allow_patterns: "list[str] | None" = None,
 ) -> None:
     """Run snapshot_download in the venv with timeout, retry, and progress tracking.
 
     All variable data (token, paths) is passed via env vars rather than
     interpolated into the script string — this avoids quoting issues with
     Windows paths and tokens containing special characters.
+
+    *allow_patterns* restricts the download to matching files.  It is used to
+    take only the weight shards out of a repo whose config and tokenizer must
+    not overwrite files already sitting in *local_dir*.
     """
     import time as _time
 
-    if local_dir:
-        dl_script = (
-            "import os; from huggingface_hub import snapshot_download; "
-            "tok = os.environ.get('_KBB_HF_TOKEN') or None; "
-            "snapshot_download(repo_id=os.environ['_KBB_REPO_ID'], "
-            "local_dir=os.environ['_KBB_LOCAL_DIR'], token=tok)"
-        )
-    else:
-        dl_script = (
-            "import os; from huggingface_hub import snapshot_download; "
-            "tok = os.environ.get('_KBB_HF_TOKEN') or None; "
-            "snapshot_download(repo_id=os.environ['_KBB_REPO_ID'], token=tok)"
-        )
+    dl_script = (
+        "import json, os\n"
+        "from huggingface_hub import snapshot_download\n"
+        "kwargs = {\n"
+        "    'repo_id': os.environ['_KBB_REPO_ID'],\n"
+        "    'token': os.environ.get('_KBB_HF_TOKEN') or None,\n"
+        "}\n"
+        "if os.environ.get('_KBB_LOCAL_DIR'):\n"
+        "    kwargs['local_dir'] = os.environ['_KBB_LOCAL_DIR']\n"
+        "if os.environ.get('_KBB_PATTERNS'):\n"
+        "    kwargs['allow_patterns'] = json.loads(os.environ['_KBB_PATTERNS'])\n"
+        "snapshot_download(**kwargs)\n"
+    )
 
     extra_env = {
         "_KBB_REPO_ID":           repo_id,
@@ -676,6 +682,8 @@ def _download_with_retry(
     }
     if local_dir:
         extra_env["_KBB_LOCAL_DIR"] = local_dir
+    if allow_patterns:
+        extra_env["_KBB_PATTERNS"] = json.dumps(allow_patterns)
 
     def _on_line(line: str) -> None:
         pct = _parse_tqdm_pct(line)
