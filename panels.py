@@ -105,27 +105,78 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
     bl_label    = "⚙  Connection"
     bl_idname   = "KIMODO_PT_Connection"
     bl_order    = 10
-    
 
     def draw(self, context):
         layout = self.layout
         s = context.scene.kimodo
-
         running = s.is_connected
 
-        # --- Auto-install section ---
+        # --- Backend selector ---
+        # Which model generates the motion. Only one bridge runs at a time, so
+        # switching stops the current one (see properties._on_backend_update).
+        row = layout.row(align=True)
+        row.prop(s, "backend", expand=True)
+        layout.separator(factor=0.5)
+
+        if s.backend == 'ARDY':
+            self._draw_ardy(layout, context, s, running)
+        else:
+            self._draw_kimodo(layout, context, s, running)
+
+    # ------------------------------------------------------------------ shared
+
+    def _draw_progress(self, layout, backend: str) -> bool:
+        """Live install progress. True when an install for *backend* is running.
+
+        Both installers share setup_operator's state, so the box is drawn only
+        for whichever backend actually started the install.
+        """
         from . import setup_operator as so
 
-        if so.is_installing():
-            box = layout.box()
-            box.label(text="Installing Kimodo…", icon='TIME')
-            box.label(text=so.install_status())
-            dl_pct = so.download_progress()
-            if dl_pct > 0.0:
-                label = so.download_label()
-                short = label.replace("Downloading ", "").replace(" (attempt 1/3)", "")
-                box.progress(factor=dl_pct, text=f"{short}  {int(dl_pct * 100)}%")
-            layout.separator(factor=0.5)
+        if not so.is_installing() or so.install_target() != backend:
+            return False
+        name = "ARDY" if backend == "ardy" else "Kimodo"
+        box = layout.box()
+        box.label(text=f"Installing {name}…", icon='TIME')
+        box.label(text=so.install_status())
+        dl_pct = so.download_progress()
+        if dl_pct > 0.0:
+            label = so.download_label()
+            short = label.replace("Downloading ", "").replace(" (attempt 1/3)", "")
+            box.progress(factor=dl_pct, text=f"{short}  {int(dl_pct * 100)}%")
+        layout.separator(factor=0.5)
+        return True
+
+    def _draw_connection_controls(self, layout, s, running, label: str):
+        """Start / Stop plus the status line — identical for both backends."""
+        layout.separator(factor=0.5)
+        if running:
+            layout.operator("kimodo.stop_kimodo",
+                            text=f"Stop {label}", icon='CANCEL')
+        else:
+            layout.operator("kimodo.start_kimodo",
+                            text=f"Start {label}", icon='PLAY')
+
+        status_row = layout.row()
+        if running:
+            status_row.label(text=s.connection_status, icon='CHECKMARK')
+        elif s.connection_status in ("Not started", "Stopped"):
+            status_row.label(text=s.connection_status, icon='RADIOBUT_OFF')
+        else:
+            is_err = s.connection_status.startswith("Failed") or \
+                     s.connection_status.startswith("Error")
+            status_row.label(
+                text=s.connection_status,
+                icon='ERROR' if is_err else 'TIME',
+            )
+
+    # ------------------------------------------------------------------ Kimodo
+
+    def _draw_kimodo(self, layout, context, s, running):
+        from . import setup_operator as so
+
+        if self._draw_progress(layout, "kimodo"):
+            pass
 
         elif so.install_failed() or (so.venv_exists() and not so.is_installed()):
             # install_failed()  → failed this session
@@ -220,31 +271,7 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
         row.prop(s, "use_offload", text="Enable Memory Offload")
         row.enabled = not running
 
-        layout.separator(factor=0.5)
-
-        # --- Start / Stop buttons ---
-        if running:
-            layout.operator("kimodo.stop_kimodo",
-                            text="Stop Kimodo", icon='CANCEL')
-        else:
-            layout.operator("kimodo.start_kimodo",
-                            text="Start Kimodo", icon='PLAY')
-
-        # --- Status ---
-        status_row = layout.row()
-        if running:
-            status_row.label(text=s.connection_status, icon='CHECKMARK')
-        elif s.connection_status in ("Not started", "Stopped"):
-            status_row.label(text=s.connection_status, icon='RADIOBUT_OFF')
-        else:
-            # Loading or error
-            is_err = s.connection_status.startswith("Failed") or \
-                     s.connection_status.startswith("Error")
-            status_row.label(
-                text=s.connection_status,
-                icon='ERROR' if is_err else 'TIME',
-            )
-
+        self._draw_connection_controls(layout, s, running, "Kimodo")
 
         # --- Delete venv (always shown when installed) ---
         if so.is_installed() and not so.is_installing():
@@ -252,6 +279,152 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             row = layout.row()
             row.alignment = 'RIGHT'
             row.operator("kimodo.reset_venv", text="Delete Venv", icon='TRASH', emboss=False)
+
+    # -------------------------------------------------------------------- ARDY
+
+    def _draw_llama_access(self, box, context):
+        """The one ARDY prerequisite that cannot be automated.
+
+        ARDY's text encoder descends from meta-llama/Meta-Llama-3-8B-Instruct,
+        which is gated: the user has to accept the licence on HuggingFace and
+        supply a token. Spelling out both steps with direct links is the
+        difference between a two-minute setup and a dead end.
+        """
+        box.label(text="1. Accept the Llama 3 licence (free, instant-ish):",
+                  icon='URL')
+        op = box.operator("kimodo.open_url",
+                          text="Open Meta-Llama-3-8B-Instruct page", icon='URL')
+        op.url = "https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct"
+        box.label(text="2. Create a HuggingFace read token:", icon='LOCKED')
+        op = box.operator("kimodo.open_url",
+                          text="Open HuggingFace token settings", icon='URL')
+        op.url = "https://huggingface.co/settings/tokens"
+        box.label(text="3. Paste the token here:", icon='BLANK1')
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+            box.prop(prefs, "hf_token", text="")
+        except Exception:
+            pass
+
+    def _draw_ardy(self, layout, context, s, running):
+        from . import setup_operator as so
+        from . import ardy_setup as aso
+
+        has_token = False
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+            has_token = bool((prefs.hf_token or "").strip())
+        except Exception:
+            pass
+
+        if self._draw_progress(layout, "ardy"):
+            pass
+
+        elif (so.install_target() == "ardy" and so.install_failed()) or \
+                (aso.venv_exists() and not aso.is_installed()):
+            box = layout.box()
+            box.alert = True
+            box.label(text="ARDY installation incomplete", icon='ERROR')
+            if so.install_target() == "ardy" and so.install_status():
+                _label_wrapped(box.column(align=True), so.install_status(),
+                               context, icon='BLANK1')
+            box.separator(factor=0.3)
+            if so.needs_llama_access():
+                self._draw_llama_access(box, context)
+                box.separator(factor=0.3)
+            op = box.operator("kimodo.install_ardy",
+                              text="Retry Install", icon='FILE_REFRESH')
+            op.prompt_location = False
+            box.operator("kimodo.reset_ardy_venv", text="Reset ARDY Venv", icon='TRASH')
+            layout.separator(factor=0.5)
+
+        elif not aso.is_installed() and not aso.is_ardy_venv(s.ardy_python_executable):
+            box = layout.box()
+            has_gpu = so.has_nvidia_gpu()
+            box.label(text="ARDY not installed", icon='INFO')
+            box.separator(factor=0.3)
+
+            # A plain checklist beats a paragraph: every row says whether this
+            # machine already satisfies it.
+            box.label(text="NVIDIA GPU (CUDA)",
+                      icon='CHECKMARK' if has_gpu else 'ERROR')
+            box.label(text="Python 3.10–3.12 on your system", icon='DOT')
+            box.label(text="~25 GB free disk (encoder is ~16 GB)", icon='DOT')
+            box.label(text="HuggingFace token with Llama 3 access",
+                      icon='CHECKMARK' if has_token else 'ERROR')
+            box.separator(factor=0.3)
+
+            if not has_gpu:
+                box.label(text="ARDY needs an NVIDIA GPU — AMD and Intel are",
+                          icon='ERROR')
+                box.label(text="not supported.", icon='BLANK1')
+                box.separator(factor=0.3)
+
+            if not has_token:
+                self._draw_llama_access(box, context)
+                box.separator(factor=0.3)
+
+            box.label(text="Everything else is automatic: venv, PyTorch,", icon='INFO')
+            box.label(text="ARDY, text encoder and the Core checkpoint.", icon='BLANK1')
+            box.label(text="Click Install, then pick a folder for the ARDY venv.",
+                      icon='FILE_FOLDER')
+
+            row = box.row()
+            row.scale_y = 1.3
+            row.enabled = has_gpu and has_token
+            row.operator("kimodo.install_ardy", icon='IMPORT')
+            if has_gpu and not has_token:
+                box.label(text="Paste a token above to enable Install.", icon='INFO')
+            self._draw_ardy_advanced(box, context, s, show_python=False)
+            layout.separator(factor=0.5)
+
+        elif not s.ardy_python_executable or not os.path.isfile(s.ardy_python_executable):
+            box = layout.box()
+            box.label(text="ARDY venv ready", icon='CHECKMARK')
+            box.operator("kimodo.use_installed_ardy", icon='CONSOLE')
+            self._draw_ardy_advanced(box, context, s, show_python=True)
+            layout.separator(factor=0.5)
+        else:
+            box = layout.box()
+            self._draw_ardy_advanced(box, context, s, show_python=True)
+            layout.separator(factor=0.5)
+
+        installed = aso.is_installed() or aso.is_ardy_venv(s.ardy_python_executable)
+
+        # --- Model + text encoder ---
+        row = layout.row(align=True)
+        row.label(text="Model:", icon='ARMATURE_DATA')
+        row.prop(s, "ardy_model", text="")
+        row.enabled = not running
+
+        row = layout.row(align=True)
+        row.label(text="Encoder:", icon='CONSOLE')
+        row.prop(s, "ardy_text_encoder_device", text="")
+        row.enabled = not running
+        if s.ardy_text_encoder_device == 'AUTO' and not running:
+            layout.label(text="GPU encoder needs ~14 GB VRAM — switch to CPU",
+                         icon='INFO')
+            layout.label(text="if you run out of memory.", icon='BLANK1')
+
+        # Foot-skate cleanup needs the native extension, which only builds when
+        # CMake and a C++ compiler were present at install time.
+        if installed and not aso.has_postprocess(s.ardy_python_executable):
+            box = layout.box()
+            box.label(text="Foot-skate cleanup unavailable", icon='INFO')
+            box.label(text="ARDY installed without its motion-correction", icon='BLANK1')
+            box.label(text="extension (no CMake / C++ compiler found).", icon='BLANK1')
+            box.label(text="Install both and reinstall to enable it.", icon='BLANK1')
+
+        self._draw_connection_controls(layout, s, running, "ARDY")
+
+        if installed and not so.is_installing():
+            layout.separator(factor=0.5)
+            row = layout.row()
+            row.alignment = 'RIGHT'
+            row.operator("kimodo.reset_ardy_venv", text="Delete ARDY Venv",
+                         icon='TRASH', emboss=False)
+
+    # ---------------------------------------------------------------- advanced
 
     def _draw_advanced(self, box, context, s, show_python=False):
         """Collapsible Advanced overrides: Python path, HF token, install location.
@@ -293,6 +466,46 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
         except Exception:
             pass
 
+    def _draw_ardy_advanced(self, box, context, s, show_python=False):
+        """Same idea as _draw_advanced, against the ARDY venv's own settings."""
+        expanded = s.show_advanced_connection
+        box.prop(
+            s, "show_advanced_connection",
+            text="Advanced",
+            icon='TRIA_DOWN' if expanded else 'TRIA_RIGHT',
+            emboss=False,
+        )
+        if not expanded:
+            return
+
+        col = box.column(align=True)
+        if show_python:
+            col.label(text="ARDY Python:", icon='CONSOLE')
+            row = col.row(align=True)
+            row.prop(s, "ardy_python_executable", text="")
+            row.enabled = not s.is_connected
+            col.label(text="Leave blank to use the managed ARDY venv", icon='INFO')
+            col.separator(factor=0.5)
+
+        try:
+            prefs = context.preferences.addons[__package__].preferences
+            col.label(text="HF Token (required — Llama 3 access):", icon='LOCKED')
+            col.prop(prefs, "hf_token", text="")
+            col.label(text="System Python 3.10–3.12 (override auto-detect):",
+                      icon='CONSOLE')
+            col.prop(prefs, "system_python_override", text="")
+            col.label(text="ARDY install location (blank = default ~/.ardy-venv):",
+                      icon='FILE_FOLDER')
+            col.prop(prefs, "ardy_install_location", text="")
+        except Exception:
+            pass
+
+        col.separator(factor=0.5)
+        col.label(text="Generation tuning:", icon='PREFERENCES')
+        col.prop(s, "ardy_cfg_text_weight")
+        col.prop(s, "ardy_cfg_constraint_weight")
+        col.prop(s, "ardy_history_frames")
+
 
 # ---------------------------------------------------------------------------
 # Panel 2: Generate — Single Clip or Timeline, one workflow
@@ -322,9 +535,14 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
 
         layout.separator(factor=0.5)
 
-        row = layout.row(align=True)
-        row.label(text="Model:")
-        row.prop(s, "model_type", expand=True)
+        if s.backend == 'ARDY':
+            row = layout.row(align=True)
+            row.label(text=f"Model: ARDY {s.active_skeleton or 'core'}"
+                           f"  ·  {int(round(s.native_fps))} FPS")
+        else:
+            row = layout.row(align=True)
+            row.label(text="Model:")
+            row.prop(s, "model_type", expand=True)
 
         layout.separator(factor=0.5)
 
@@ -336,23 +554,43 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
         layout.separator()
 
         # --- Shared: output options ---
-        layout.prop(s, "bvh_standard_tpose", icon='ARMATURE_DATA')
+        # "Standard T-pose" needs standard_t_pose_global_offsets_rots.p, which
+        # only the SOMA skeleton ships. ARDY's Core skeleton has no such asset,
+        # so the option would silently do nothing — hide it instead.
+        if s.backend != 'ARDY':
+            layout.prop(s, "bvh_standard_tpose", icon='ARMATURE_DATA')
         reuse_row = layout.row(align=True)
         reuse_row.prop(s, "reuse_armature", text="Reuse", icon='ARMATURE_DATA')
         reuse_row.operator("kimodo.pick_latest_armature", text="", icon='SORTTIME')
 
         if s.generate_mode == 'TIMELINE':
-            trans_row = layout.row(align=True)
-            trans_row.label(text="Transition Frames:")
-            trans_row.prop(s, "num_transition_frames", text="")
+            if s.backend == 'ARDY':
+                # ARDY has no blend length: each segment continues from the
+                # previous one's motion, so smoothness is set by how much
+                # history the model sees (Connection ▸ Advanced).
+                layout.label(text="Transitions come from generation history",
+                             icon='INFO')
+            else:
+                trans_row = layout.row(align=True)
+                trans_row.label(text="Transition Frames:")
+                trans_row.prop(s, "num_transition_frames", text="")
 
         # --- Shared: FPS warning ---
+        # Kimodo is 30 FPS; ARDY Core is 20 and G1 is 25, and the running
+        # bridge reports the real value into native_fps.
+        model_fps = float(s.native_fps) if s.backend == 'ARDY' else 30.0
+        label = "ARDY" if s.backend == 'ARDY' else "Kimodo"
         scene_fps = context.scene.render.fps / context.scene.render.fps_base
-        if abs(scene_fps - 30.0) > 0.01:
+        if abs(scene_fps - model_fps) > 0.01:
             fps_box = layout.box()
             fps_box.alert = True
-            fps_box.label(text=f"Scene is {scene_fps:.4g} FPS — Kimodo needs 30 FPS", icon='ERROR')
-            fps_box.operator("kimodo.set_to_30fps", text="Set to 30 FPS", icon='RECOVER_LAST')
+            fps_box.label(
+                text=f"Scene is {scene_fps:.4g} FPS — {label} needs "
+                     f"{model_fps:.4g} FPS",
+                icon='ERROR')
+            fps_box.operator("kimodo.set_to_30fps",
+                             text=f"Set to {int(round(model_fps))} FPS",
+                             icon='RECOVER_LAST')
 
         layout.separator()
 

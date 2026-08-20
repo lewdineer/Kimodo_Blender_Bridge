@@ -1,8 +1,16 @@
 """
 Kimodo Blender Bridge — Subprocess Client
 
-Runs inside Blender's Python. Manages the bridge_server.py subprocess
-which runs under the Kimodo venv Python (with PyTorch, Kimodo, etc.).
+Runs inside Blender's Python. Manages the bridge subprocess, which runs under
+a managed venv Python (with PyTorch and the generation model).
+
+Two backends speak the same protocol and are therefore interchangeable here:
+
+    kimodo -> bridge_server.py  in the Kimodo venv  (SOMA skeleton, 30 FPS)
+    ardy   -> ardy_bridge.py    in the ARDY venv    (Core skeleton, 20 FPS)
+
+Only which script and which Python get launched differs; everything below —
+framing, threading, cancellation — is shared.
 
 Communication: newline-delimited JSON over stdin / stdout.
 
@@ -38,6 +46,8 @@ _status = "Not started"
 _ready  = False
 _busy   = False              # a request is in flight on the pipe
 _cancel_requested = False
+_backend = "kimodo"          # which bridge the running process is
+_ready_info: dict = {}       # the bridge's "ready" message (fps, skeleton, …)
 
 # Prevent a console window from flashing up for the subprocess on Windows
 # (Blender is a GUI process; child console apps get their own window
@@ -47,8 +57,33 @@ _NO_WINDOW = (
 )
 
 
-def _bridge_path() -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "bridge_server.py")
+# Bridge script per backend, resolved next to this file.
+_BRIDGE_SCRIPTS = {
+    "kimodo": "bridge_server.py",
+    "ardy":   "ardy_bridge.py",
+}
+
+# Shown in the system console so two backends' logs are never confused.
+_LOG_PREFIX = {"kimodo": "[Kimodo Bridge]", "ardy": "[ARDY Bridge]"}
+
+
+def _bridge_path(backend: str = "kimodo") -> str:
+    script = _BRIDGE_SCRIPTS.get(backend, _BRIDGE_SCRIPTS["kimodo"])
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), script)
+
+
+def get_backend() -> str:
+    """Which backend the running (or last-run) bridge is."""
+    return _backend
+
+
+def get_ready_info() -> dict:
+    """The bridge's 'ready' message: fps, skeleton, device, and backend extras.
+
+    Empty until a bridge reports ready. The add-on reads 'fps' and 'skeleton'
+    from here rather than assuming Kimodo's 30 FPS / SOMA.
+    """
+    return dict(_ready_info)
 
 
 def _send(obj: dict) -> None:
@@ -85,34 +120,45 @@ def _read_stdout(pipe, q: "queue.Queue") -> None:
 # Public API
 # ---------------------------------------------------------------------------
 
-def start(python_exe: str, model_name: str, use_offload: bool = False, progress_callback=None) -> "tuple[bool, str]":
+def start(python_exe: str, model_name: str, use_offload: bool = False,
+          progress_callback=None, backend: str = "kimodo",
+          extra_args: "list[str] | None" = None) -> "tuple[bool, str]":
     """
-    Launch bridge_server.py and block until the model reports ready.
+    Launch the backend's bridge and block until the model reports ready.
     Must be called from a background thread — model loading takes 1-3 min.
     Returns (success, status_message).
     """
     global _proc, _stdout_queue, _status, _ready, _busy, _cancel_requested
+    global _backend, _ready_info
 
     with _lock:
         if _proc is not None and _proc.poll() is None:
             return True, _status  # already running
 
-        bridge = _bridge_path()
+        backend = backend if backend in _BRIDGE_SCRIPTS else "kimodo"
+        _backend = backend
+        _ready_info = {}
+        label = "ARDY" if backend == "ardy" else "Kimodo"
+
+        bridge = _bridge_path(backend)
         if not os.path.isfile(bridge):
-            return False, f"bridge_server.py not found at: {bridge}"
+            return False, f"{os.path.basename(bridge)} not found at: {bridge}"
 
-        python = _resolve_python(python_exe)
+        python = _resolve_python(python_exe, backend)
 
-        # A moved/renamed venv leaves an absolute path baked into
+        # Kimodo only: a moved/renamed venv leaves an absolute path baked into
         # llm2vec_wrapper.py pointing at the old location; generation then
         # fails with a HuggingFace "Repo id must be in the form…" error.
-        # Repair it in place so a relocated Kimodo venv just works.
-        try:
-            from . import setup_operator as _so
-            if _so.is_kimodo_venv(python):
-                _so.heal_wrapper_path(python)
-        except Exception:
-            pass
+        # Repair it in place so a relocated Kimodo venv just works. ARDY needs
+        # no equivalent — its wrapper reads TEXT_ENCODERS_DIR from the
+        # environment instead of hardcoding a path.
+        if backend == "kimodo":
+            try:
+                from . import setup_operator as _so
+                if _so.is_kimodo_venv(python):
+                    _so.heal_wrapper_path(python)
+            except Exception:
+                pass
 
         _ready  = False
         _busy   = False
@@ -121,8 +167,11 @@ def start(python_exe: str, model_name: str, use_offload: bool = False, progress_
 
         try:
             cmd = [python, bridge, "--model", model_name]
-            if use_offload:
-                cmd.append("--offload")
+            if backend == "kimodo":
+                if use_offload:
+                    cmd.append("--offload")
+            elif extra_args:
+                cmd += list(extra_args)
             _proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -132,7 +181,7 @@ def start(python_exe: str, model_name: str, use_offload: bool = False, progress_
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,      # line-buffered
-                env=_bridge_env(python),
+                env=_bridge_env(python, backend),
                 **_NO_WINDOW,
             )
         except FileNotFoundError:
@@ -156,8 +205,10 @@ def start(python_exe: str, model_name: str, use_offload: bool = False, progress_
         for line in pipe:
             line = line.rstrip()
             if line:
-                print(f"[Kimodo Bridge] {line}", flush=True)
+                print(f"{_LOG_PREFIX.get(backend, '[Bridge]')} {line}", flush=True)
     threading.Thread(target=_drain, args=(_proc.stderr,), daemon=True).start()
+
+    prefix = _LOG_PREFIX.get(backend, "[Bridge]")
 
     # Wait for "ready" or "error"
     deadline = time.monotonic() + 420   # 7-min ceiling (large models, slow GPU)
@@ -169,7 +220,7 @@ def start(python_exe: str, model_name: str, use_offload: bool = False, progress_
                 # Give the stderr drain thread a moment to flush remaining lines
                 time.sleep(0.2)
                 _status = f"Process exited early (code {_proc.returncode}) — see console for details"
-                print(f"[Kimodo Bridge] ERROR: {_status}", flush=True)
+                print(f"{prefix} ERROR: {_status}", flush=True)
                 return False, _status
             continue
 
@@ -177,36 +228,38 @@ def start(python_exe: str, model_name: str, use_offload: bool = False, progress_
 
         if s == "loading":
             _status = msg.get("message", "Loading…")
-            print(f"[Kimodo Bridge] {_status}", flush=True)
+            print(f"{prefix} {_status}", flush=True)
             if progress_callback:
                 progress_callback(_status)
 
         elif s == "ready":
             _ready  = True
+            _ready_info = dict(msg)
             _status = (
                 f"Ready — {msg.get('model', model_name)} "
                 f"on {msg.get('device', '?')} "
                 f"({msg.get('fps', '?')} fps)"
             )
-            print(f"[Kimodo Bridge] {_status}", flush=True)
+            print(f"{prefix} {_status}", flush=True)
             return True, _status
 
         elif s == "error":
             err = msg.get("message", "Unknown error")
             err_message = f"Failed: {err}"
-            print(f"[Kimodo Bridge] ERROR: {err_message}", flush=True)
+            print(f"{prefix} ERROR: {err_message}", flush=True)
             stop()  # resets _status to "Stopped" — use local var
             return False, err_message
 
         else:
-            print(f"[Kimodo Bridge] {msg}", flush=True)
+            print(f"{prefix} {msg}", flush=True)
 
     stop()
-    return False, "Timed out waiting for Kimodo (>7 min)"
+    return False, f"Timed out waiting for {label} (>7 min)"
 
 
 def stop() -> None:
     global _proc, _stdout_queue, _ready, _status, _busy, _cancel_requested
+    global _ready_info
     with _lock:
         if _proc is not None:
             try:
@@ -226,6 +279,7 @@ def stop() -> None:
         _ready  = False
         _busy   = False
         _cancel_requested = False
+        _ready_info = {}
         _status = "Stopped"
 
 
@@ -286,7 +340,8 @@ def _recv_until_done(progress_callback) -> "tuple[bool, str]":
         if not is_running():
             with _lock:
                 _busy = False
-            return False, "Kimodo process died during generation."
+            label = "ARDY" if _backend == "ardy" else "Kimodo"
+            return False, f"{label} process died during generation."
 
         msg = _recv(timeout=0.2)
         if msg is None:
@@ -318,8 +373,9 @@ def _begin_request(req: dict) -> "str | None":
     global _busy, _cancel_requested
     with _lock:
         if _busy:
-            return ("Kimodo is still finishing the previous request — "
-                    "wait for it to complete and try again.")
+            label = "ARDY" if _backend == "ardy" else "Kimodo"
+            return (f"{label} is still finishing the previous request — "
+                    f"wait for it to complete and try again.")
         _busy = True
         _cancel_requested = False
     try:
@@ -331,6 +387,25 @@ def _begin_request(req: dict) -> "str | None":
     return None
 
 
+def _not_running_message() -> str:
+    label = "ARDY" if _backend == "ardy" else "Kimodo"
+    return f"{label} is not running — click 'Start {label}' first."
+
+
+def _ardy_extras(cfg_text_weight, cfg_constraint_weight, history_frames) -> dict:
+    """ARDY-only request fields.
+
+    Always sent: bridge_server.py reads its request with req.get(), so the
+    Kimodo backend simply ignores keys it does not know.
+    """
+    return {
+        "cfg_text_weight": cfg_text_weight,
+        "cfg_constraint_weight": cfg_constraint_weight,
+        # 0 / None means "let the bridge pick its window budget"
+        "history_frames": history_frames or None,
+    }
+
+
 def generate_motion(
     prompt: str,
     duration: float,
@@ -340,6 +415,9 @@ def generate_motion(
     diffusion_steps: int = 100,
     bvh_standard_tpose: bool = False,
     progress_callback=None,
+    cfg_text_weight: float = 2.0,
+    cfg_constraint_weight: float = 2.0,
+    history_frames: int = 0,
 ) -> "tuple[bool, str]":
     """
     Send one generation request. Blocks until done or error.
@@ -347,7 +425,7 @@ def generate_motion(
     Returns (success, file_path_or_error_message).
     """
     if not is_running():
-        return False, "Kimodo is not running — click 'Start Kimodo' first."
+        return False, _not_running_message()
 
     req = {
         "cmd": "generate",
@@ -358,6 +436,7 @@ def generate_motion(
         "constraints_json": constraints_json,
         "diffusion_steps": diffusion_steps,
         "bvh_standard_tpose": bvh_standard_tpose,
+        **_ardy_extras(cfg_text_weight, cfg_constraint_weight, history_frames),
     }
 
     err = _begin_request(req)
@@ -378,6 +457,9 @@ def generate_motion_multi(
     bvh_standard_tpose: bool = False,
     progress_callback=None,
     seeds: "list[int] | None" = None,
+    cfg_text_weight: float = 2.0,
+    cfg_constraint_weight: float = 2.0,
+    history_frames: int = 0,
 ) -> "tuple[bool, str]":
     """
     Generate a single continuous motion from multiple prompts in one model call.
@@ -386,7 +468,7 @@ def generate_motion_multi(
     Returns (success, file_path_or_error_message).
     """
     if not is_running():
-        return False, "Kimodo is not running — click 'Start Kimodo' first."
+        return False, _not_running_message()
 
     req = {
         "cmd": "generate_multi",
@@ -399,6 +481,7 @@ def generate_motion_multi(
         "diffusion_steps": diffusion_steps,
         "num_transition_frames": num_transition_frames,
         "bvh_standard_tpose": bvh_standard_tpose,
+        **_ardy_extras(cfg_text_weight, cfg_constraint_weight, history_frames),
     }
 
     err = _begin_request(req)
@@ -412,15 +495,26 @@ def generate_motion_multi(
 # Bridge environment
 # ---------------------------------------------------------------------------
 
-def _bridge_env(python_exe: str) -> dict:
+def _bridge_env(python_exe: str, backend: str = "kimodo") -> dict:
     """
     Build the environment dict for the bridge subprocess.
-    When the managed venv is in use and its LLM2Vec model has been downloaded,
-    set the HuggingFace offline flags so the bridge never tries to reach the
-    internet (load_model calls snapshot_download unconditionally; the weights
-    were pre-downloaded into the HF cache by the installer).
+
+    Both backends call snapshot_download unconditionally at load time, so once
+    the installer has fetched everything the HuggingFace offline flags are set
+    and the bridge never touches the network again.
+
+    ARDY additionally needs TEXT_ENCODERS_DIR, which its LLM2Vec wrapper reads
+    to find the locally downloaded encoder — no source patching required.
     """
     env = os.environ.copy()
+
+    if backend == "ardy":
+        try:
+            from . import ardy_setup as _as
+            return _as.bridge_env(python_exe, env)
+        except Exception:
+            return env
+
     try:
         from . import setup_operator as _so
         is_kimodo = _so.is_kimodo_venv(python_exe)
@@ -450,7 +544,7 @@ def _bridge_env(python_exe: str) -> dict:
 _PYTHON_SUBPATHS = ("bin/python3", "bin/python", "Scripts/python.exe", "python.exe")
 
 
-def _resolve_python(hint: str) -> str:
+def _resolve_python(hint: str, backend: str = "kimodo") -> str:
     """
     Find a Python executable from the user's hint, auto-detecting common
     patterns like venv roots, sibling venvs, and kimodo_gen on PATH.
@@ -469,6 +563,19 @@ def _resolve_python(hint: str) -> str:
             p = os.path.join(hint, rel)
             if os.path.isfile(p):
                 return p
+
+    # ARDY has its own managed venv and none of the Kimodo-specific fallbacks
+    # below apply to it — guessing a system Python would only produce a
+    # confusing "ARDY not found in this Python environment" at load time.
+    if backend == "ardy":
+        try:
+            from . import ardy_setup as _as
+            found = _as.managed_python()
+            if found:
+                return found
+        except Exception:
+            pass
+        return hint or "python3"
 
     # Look for a venv sitting next to (or near) the addon directory
     addon_dir = os.path.dirname(os.path.abspath(__file__))

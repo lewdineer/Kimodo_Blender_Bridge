@@ -1,6 +1,9 @@
 # Feasibility study: adding NVIDIA ARDY support to Kimodo Blender Bridge
 
-**Status:** research complete, no code written.
+**Status:** research complete — and since implemented. ARDY now ships as a second
+backend (v1.6.0); this document is kept as the reasoning behind that design and
+as the reference for what is still unverified. Where it says "would need" below,
+read it as what the implementation did.
 **Answers:** issue [#52 — "NV ardy support"](https://github.com/lewdineer/Kimodo_Blender_Bridge/issues/52).
 **Sources:** add-on source at `main`; [`nv-tlabs/ardy`](https://github.com/nv-tlabs/ardy)
 cloned and read at commit `693f74d13b3d04a0a22ce127ee79c929dd89756b`; the ARDY and Kimodo
@@ -353,7 +356,30 @@ tables last: the first two are permanent, the third may be superseded.
 
 ---
 
-## 9. Bottom line
+## 9. What was actually built
+
+Implemented in v1.6.0, following §6:
+
+| Gap | How it was closed |
+|---|---|
+| No BVH writer | `ardy_bvh.py` — writes from `neutral_joints` / `joint_parents` / `local_rot_mats`, in centimetres with ZXY Euler channels and an End Site on every leaf. Verified against forward kinematics to ~4e-8 m. |
+| No SOMA checkpoint | Core27 tables added to `constraints.py` behind a skeleton registry; `retarget.py` gained hints for the joints SOMA lacks. The tables are checked against ARDY's own `CoreSkeleton27` in the test suite. |
+| FPS is not 30 | The bridge reports its real rate in the `ready` message; the warning, the set-FPS operator and constraint frame mapping all read it. |
+| Install friction | `ardy_setup.py` — own venv, GPU-matched PyTorch, Llama access verified before any download, and a toolchain-aware install that drops the CMake extension when no compiler exists. |
+| Timeline mode | Chained `init_history_sequence` in `ardy_bridge.py`, following the interactive demo's accumulation exactly, with each segment trimmed to its exact frame count. |
+
+**Still unverified — needs a machine with an NVIDIA GPU.** Everything above was
+tested against mocks that reproduce the released model's call contract, not
+against real weights. Specifically untested: a real `load_model`, generation
+quality, whether the written BVH imports cleanly into Blender, retarget results
+on a real rig, and the installer end to end on Windows and Linux. The
+verification list in §6 still stands, and the "the Aero-Ex NF4 encoder may load
+under ARDY" idea in §3.4 was **not** pursued — the implementation uses ARDY's
+own encoder preset and requires the token.
+
+---
+
+## 10. Bottom line
 
 Implementing ARDY is a **medium-sized, well-bounded piece of work** — roughly: a backend split
 in `bridge_server.py`, a BVH writer, a skeleton table, a second installer path, and some UI

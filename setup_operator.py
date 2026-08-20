@@ -317,12 +317,36 @@ def _request_delete_confirmation(directory: str, action: str) -> bool:
 # ---------------------------------------------------------------------------
 
 _state: dict = {"running": False, "lines": [], "error": "", "done": False,
-                "needs_python": False, "dl_progress": 0.0, "dl_label": ""}
+                "needs_python": False, "dl_progress": 0.0, "dl_label": "",
+                "target": "kimodo", "needs_llama_access": False}
 _lock = threading.Lock()
 
 
+def install_target() -> str:
+    """Which backend the running (or last) install belongs to: 'kimodo'/'ardy'.
+
+    The two installers share this state dict so one set of progress/error UI
+    serves both; the panel uses this to label the box correctly.
+    """
+    with _lock:
+        return _state.get("target", "kimodo")
+
+
+def needs_llama_access() -> bool:
+    """True when an install stopped because the gated Llama repo was refused.
+
+    Only ARDY can hit this: its text encoder depends on
+    meta-llama/Meta-Llama-3-8B-Instruct, which requires an accepted licence and
+    a token. The panel turns this into actionable buttons rather than a raw
+    HTTP error.
+    """
+    with _lock:
+        return bool(_state.get("needs_llama_access"))
+
+
 def _log(msg: str) -> None:
-    print(f"[Kimodo Install] {msg}", flush=True)
+    prefix = "ARDY" if _state.get("target") == "ardy" else "Kimodo"
+    print(f"[{prefix} Install] {msg}", flush=True)
     with _lock:
         _state["lines"].append(msg)
         if len(_state["lines"]) > 12:
@@ -472,6 +496,36 @@ def _max_gpu_compute_capability() -> tuple[int, int]:
         return best
     except Exception:
         return (0, 0)
+
+
+def torch_index_for(py_minor: int, gpu_cap: "tuple[int, int]") -> "tuple[str, str]":
+    """Pick the PyTorch wheel index for this machine. Returns (index_url, label).
+
+    cu128 (PyTorch 2.7+): required for Blackwell GPUs (sm_120, RTX 50xx);
+                          also supports Python 3.13
+    cu124 (PyTorch 2.6+): required for Python 3.13 on older GPUs (up to sm_90)
+    cu121 (PyTorch 2.1+): Python <=3.12, GPUs up to sm_90
+
+    Shared by both installers so a machine gets the same CUDA build either way.
+    """
+    if gpu_cap >= (12, 0):
+        return "https://download.pytorch.org/whl/cu128", "12.8"
+    if py_minor >= 13:
+        return "https://download.pytorch.org/whl/cu124", "12.4"
+    return "https://download.pytorch.org/whl/cu121", "12.1"
+
+
+def python_minor_of(venv_py: str) -> int:
+    """Minor version of a Python executable (3.12 -> 12), or 0 if unknown."""
+    try:
+        r = subprocess.run(
+            [venv_py, "-c", "import sys; print(sys.version_info.minor)"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=5, env=_build_env(), **_NO_WINDOW,
+        )
+        return int(r.stdout.strip() or "0")
+    except Exception:
+        return 0
 
 
 def venv_exists() -> bool:
@@ -839,26 +893,10 @@ def _do_install(hf_token: str = "", system_python: str = "",
         #     cu124 (PyTorch 2.6+): required for Python 3.13 on older GPUs
         #                           supports up to sm_90
         #     cu121 (PyTorch 2.1+): works for Python ≤3.12, GPUs up to sm_90
-        r = subprocess.run(
-            [venv_py, "-c", "import sys; print(sys.version_info.minor)"],
-            capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=5, **_NO_WINDOW,
-        )
-        py_minor = int(r.stdout.strip() or "0")
+        py_minor = python_minor_of(venv_py)
         gpu_cap = _max_gpu_compute_capability()
         _log(f"Detected GPU compute capability: {gpu_cap[0]}.{gpu_cap[1]}")
-
-        if gpu_cap >= (12, 0):
-            # Blackwell (RTX 50xx / sm_120+): only PyTorch 2.7+ / cu128 has kernels
-            torch_index = "https://download.pytorch.org/whl/cu128"
-            cuda_label = "12.8"
-        elif py_minor >= 13:
-            # Python 3.13 on Ampere/Ada/Hopper: PyTorch 2.6+ / cu124
-            torch_index = "https://download.pytorch.org/whl/cu124"
-            cuda_label = "12.4"
-        else:
-            torch_index = "https://download.pytorch.org/whl/cu121"
-            cuda_label = "12.1"
+        torch_index, cuda_label = torch_index_for(py_minor, gpu_cap)
         _log(f"Installing PyTorch with CUDA {cuda_label} support — this may take several minutes…")
         _run(
             [*pip, "install", "torch",
@@ -1168,7 +1206,8 @@ class KIMODO_OT_InstallKimodo(Operator):
 
         with _lock:
             _state.update(running=True, lines=[], error="", done=False,
-                          needs_python=False, dl_progress=0.0, dl_label="")
+                          needs_python=False, dl_progress=0.0, dl_label="",
+                          target="kimodo", needs_llama_access=False)
 
         # Read the HF token and Python override on the main thread —
         # preferences are not safe to access from background threads.

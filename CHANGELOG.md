@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.6.0] — 2026-08-20
+
+### Added
+
+- **NVIDIA ARDY as a second backend** (#52): the Connection panel now starts with a Kimodo / ARDY switch, and everything downstream — generation, motion constraints, the timeline, retargeting, the frame-rate warning — follows whichever is selected. Kimodo remains the default and is unchanged; nothing about an existing scene behaves differently until the switch is moved. ARDY is autoregressive rather than one-shot, so it responds faster and handles long sequences better, and its Core skeleton uses Mixamo-style bone names (with toes) that auto-map onto typical rigs more cleanly than SOMA's. What it costs today: 20 FPS instead of 30, no standard-T-pose export (the Core skeleton ships no T-pose reference), and a gated text encoder. NVIDIA has announced an ARDY SOMA checkpoint but not released it — only Core and G1 exist, so Core is what the addon offers. The full analysis, including what changes when SOMA lands, is in `docs/ardy-feasibility.md`.
+- **One-click ARDY installer**: *Install ARDY (Auto)* creates its own venv (default `~/.ardy-venv`, never shared with Kimodo — ARDY pins `transformers` exactly), installs PyTorch matched to your GPU using the same detection as the Kimodo installer, installs ARDY, downloads the text encoder and the Core checkpoint, and sets the Python path. Two things that would otherwise be dead ends are handled directly: ARDY's text encoder is built on the gated Meta-Llama-3-8B-Instruct, so the panel links the licence page and the token page, and access is verified *before* anything is downloaded — a missing licence fails in seconds instead of after twenty minutes. And ARDY's `setup.py` always compiles a CMake extension with no way to skip it, which would fail outright on a machine with no compiler; the installer detects the toolchain and, when it is absent, installs without the extension and says so in the panel. Everything works in that state except foot-skate cleanup. All deletion, subprocess-environment, download-retry and progress machinery is shared with the Kimodo installer, including the 1.5.7 `_safe_rmtree` guards.
+- **BVH writer for ARDY** (`ardy_bvh.py`): ARDY has no BVH exporter — it writes `.npz`, and `ardy/skeleton/bvh.py` only *reads* BVH — so the bridge writes its own from the skeleton's rest joints, hierarchy and per-frame local rotations. Output goes through the addon's existing BVH import, reuse-armature, history and retarget paths unchanged.
+- **Blender-free test suite** (`tests/`): `python3 tests/run_tests.py`. Covers the BVH writer against forward kinematics, the ARDY bridge driven over its real JSON protocol as a subprocess, add-on registration and property wiring, and every panel drawn in both backends. `bpy` and the ARDY model are mocked, so no Blender and no GPU are needed; modules whose optional dependency is missing are skipped rather than failed.
+
+### Changed
+
+- **The bridge protocol is now backend-neutral**: `subprocess_client.py` launches `bridge_server.py` or `ardy_bridge.py` depending on the backend and reads the model's real frame rate and skeleton out of its `ready` message instead of assuming Kimodo's 30 FPS and SOMA. The wire format, every status value, the threading model and cancellation are untouched, so the Kimodo path is byte-for-byte what it was.
+- **The frame-rate warning follows the model**: it read "Kimodo needs 30 FPS" and set 30 unconditionally; it now names the active model's own rate (Kimodo 30, ARDY Core 20) and sets that.
+- **Constraint JSON is no longer SOMA-only**: `constraints.py` gained a skeleton registry, and `build_constraints_json` takes the joint order, parents and end-effector indices from whichever model is loaded. The JSON layout itself did not change — ARDY registers the same constraint types and accepts the same keys — so the Motion Constraints panel, curve waypoints and full-body pose authoring all work against either backend with no user-visible difference.
+- **Bone auto-matching knows the Core skeleton**: the SOMA hint table already covered most of Core27, so only the joints SOMA lacks (Spine3, hand ends, thumbs) were added.
+
 ## [1.5.8] — 2026-08-20
 
 ### Changed

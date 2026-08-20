@@ -59,6 +59,24 @@ SEED_MODE_ITEMS = [
 ]
 
 
+def _on_backend_update(self, context):
+    """Switching backend ends the current bridge session.
+
+    Only one bridge process runs at a time and the two speak to different
+    models in different venvs, so leaving a stale "connected" state would send
+    the next Generate to the wrong backend.
+    """
+    from . import subprocess_client as sc
+    if sc.is_running():
+        sc.stop()
+    self.is_connected = False
+    self.connection_status = f"Switched to {self.backend} — click Start."
+    # Constraint indexing follows the model's skeleton; reset to the backend's
+    # default until a bridge reports what it actually loaded.
+    self.active_skeleton = "core" if self.backend == 'ARDY' else "soma"
+    self.native_fps = 20.0 if self.backend == 'ARDY' else 30.0
+
+
 def _on_seed_mode_update(self, context):
     """When switching to FIXED, copy last_used_seed into seed so the panel
     field shows the seed that was actually used last — letting the user lock
@@ -279,6 +297,93 @@ class KIMODO_SceneSettings(PropertyGroup):
         ),
         default=False,
     )
+    backend: EnumProperty(
+        name="Backend",
+        description="Which motion model generates the animation",
+        items=[
+            ('KIMODO', "Kimodo",
+             "NVIDIA Kimodo — SOMA skeleton at 30 FPS. Diffusion in one shot, "
+             "with standard T-pose export. The established default"),
+            ('ARDY', "ARDY",
+             "NVIDIA ARDY — autoregressive, faster to respond, better at long "
+             "sequences. Core skeleton at 20 FPS (Mixamo-style bone names, "
+             "with toes). Needs its own install"),
+        ],
+        default='KIMODO',
+        update=_on_backend_update,
+    )
+    # What the running bridge reported. Constraint JSON is indexed by the
+    # model's joint order, so this decides which tables constraints.py uses.
+    active_skeleton: StringProperty(
+        name="Active Skeleton",
+        description="Skeleton reported by the running bridge (soma / core)",
+        default="soma",
+    )
+    native_fps: FloatProperty(
+        name="Model FPS",
+        description="Frame rate the loaded model generates at. Kimodo is 30; "
+                    "ARDY Core is 20 and ARDY G1 is 25",
+        default=30.0,
+        min=1.0,
+        max=240.0,
+    )
+
+    # --- ARDY ---
+    ardy_python_executable: StringProperty(
+        name="ARDY Python",
+        description=(
+            "Path to the Python executable (or venv root) that has ARDY "
+            "installed. Leave blank to use the managed ARDY venv."
+        ),
+        default="",
+        subtype='FILE_PATH',
+    )
+    ardy_model: EnumProperty(
+        name="ARDY Model",
+        description="ARDY checkpoint to load into the bridge process",
+        items=[
+            ("ARDY-Core-RP-20FPS-Horizon40", "ARDY Core (40)",
+             "Core skeleton, 20 FPS, 40-frame horizon. Best quality — "
+             "recommended"),
+            ("ARDY-Core-RP-20FPS-Horizon8", "ARDY Core (8)",
+             "Core skeleton, 20 FPS, 8-frame horizon. Reacts to prompt changes "
+             "sooner, at some cost in smoothness"),
+        ],
+        default="ARDY-Core-RP-20FPS-Horizon40",
+    )
+    ardy_text_encoder_device: EnumProperty(
+        name="Text Encoder",
+        description="Where ARDY runs its LLM2Vec text encoder",
+        items=[
+            ('AUTO', "Auto (GPU)",
+             "Run the encoder on the GPU — fastest, but it needs about 14 GB "
+             "of VRAM on its own"),
+            ('CPU', "CPU (low VRAM)",
+             "Run the encoder on the CPU. Prompt encoding takes a few seconds "
+             "longer but frees ~14 GB of VRAM — use this on 8-12 GB cards"),
+        ],
+        default='AUTO',
+    )
+    ardy_cfg_text_weight: FloatProperty(
+        name="Text Guidance",
+        description="How strongly the motion follows the prompt. Higher is "
+                    "more literal but can look stiff (ARDY default 2.0)",
+        default=2.0, min=0.0, max=10.0,
+    )
+    ardy_cfg_constraint_weight: FloatProperty(
+        name="Constraint Guidance",
+        description="How strongly the motion follows spatial constraints "
+                    "(ARDY default 2.0)",
+        default=2.0, min=0.0, max=10.0,
+    )
+    ardy_history_frames: IntProperty(
+        name="History Frames",
+        description="How many past frames the model sees at each step. "
+                    "0 uses the model's full trained window: smoother "
+                    "transitions. Lower values adapt to a new prompt sooner",
+        default=0, min=0, max=600,
+    )
+
     python_executable: StringProperty(
         name="Python",
         description=(
@@ -547,6 +652,18 @@ class KIMODO_AddonPreferences(AddonPreferences):
         ),
         default="",
         subtype='FILE_PATH',   # renders as text field + file-browser button in Blender
+    )
+
+    ardy_install_location: StringProperty(
+        name="ARDY Install Location",
+        description=(
+            "Folder where the ARDY virtual environment is created and looked "
+            "for. Stored in the addon preferences so it is remembered across "
+            "Blender restarts and scenes. Leave blank to use the default "
+            "~/.ardy-venv."
+        ),
+        default="",
+        subtype='DIR_PATH',
     )
 
     install_location: StringProperty(

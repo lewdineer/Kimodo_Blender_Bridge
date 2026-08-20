@@ -1,6 +1,6 @@
 
 
-A Blender addon that generates AI-driven human motion via [NVIDIA Kimodo](https://github.com/nv-tlabs/kimodo) and imports it directly into your scene — no copy-pasting, no manual BVH wrangling.
+A Blender addon that generates AI-driven human motion via [NVIDIA Kimodo](https://github.com/nv-tlabs/kimodo) or [NVIDIA ARDY](https://github.com/nv-tlabs/ardy) and imports it directly into your scene — no copy-pasting, no manual BVH wrangling.
 
 ## Star History
 
@@ -34,15 +34,37 @@ Superhive: https://superhivemarket.com/products/kimodoblenderbridge
 
 ## How it works
 
-Blender's embedded Python cannot load PyTorch or Kimodo directly. The addon solves this with a two-process bridge:
+Blender's embedded Python cannot load PyTorch, Kimodo or ARDY directly. The addon solves this with a two-process bridge:
 
 ```
-Blender (addon)                Kimodo venv
-  subprocess_client.py  ─────▶  bridge_server.py
-                        ◀─────  (model loaded once, handles requests)
+Blender (addon)                 model venv
+  subprocess_client.py  ─────▶  bridge_server.py   (Kimodo)
+                        ◀─────  ardy_bridge.py     (ARDY)
+                                 model loaded once, handles requests
 ```
 
-The bridge server loads the Kimodo model once at startup and then responds to generation requests over stdin/stdout. Blender stays responsive while generation runs in a background thread.
+The bridge server loads the model once at startup and then responds to generation requests over stdin/stdout. Blender stays responsive while generation runs in a background thread.
+
+---
+
+## Choosing a backend
+
+Pick one at the top of the **Connection** panel. They install into separate venvs and can both be present; only one runs at a time.
+
+| | **Kimodo** (default) | **ARDY** |
+|---|---|---|
+| Skeleton | SOMA | Core — Mixamo-style bone names, with toes |
+| Frame rate | 30 FPS | 20 FPS |
+| How it generates | One-shot diffusion over the whole clip | Autoregressive — continues from what it already made |
+| Timeline mode | Segments blended over N transition frames | Segments continue from generation history |
+| Standard T-pose export | Yes | No — the Core skeleton ships no T-pose reference |
+| Text encoder | Pre-quantized, no HuggingFace account needed | Gated Llama 3 — needs an account and a token |
+| Install size | ~10 GB | ~25 GB |
+| Best at | Authored clips with precise constraints | Long sequences and fast iteration |
+
+> **Which should I use?** Start with Kimodo. Try ARDY when you want long or rapidly-iterated motion, or when your target rig uses Mixamo-style names — the Core skeleton auto-maps onto those more cleanly.
+
+> NVIDIA has announced an ARDY SOMA checkpoint but not released it. Until it lands, ARDY means the Core skeleton at 20 FPS. See [`docs/ardy-feasibility.md`](docs/ardy-feasibility.md) for the full analysis.
 
 ---
 
@@ -53,10 +75,18 @@ The bridge server loads the Kimodo model once at startup and then responds to ge
 | Blender 4.0+ | Tested on 5.1 (Windows & Arch Linux) |
 | Python 3.10–3.12 | System Python used to create the managed venv |
 | NVIDIA GPU | 8 GB+ VRAM recommended; 16 GB+ for best results |
-| CUDA | Must match your PyTorch build (CUDA 12.1 installed by default) |
+| CUDA | Must match your PyTorch build (installed automatically for your GPU) |
 | ~10 GB disk | For the managed venv, model weights, and LLM2Vec encoder |
 
-> **Low VRAM?** Run `kimodo_textencoder --device cpu` in a separate terminal with the Kimodo venv activated. This offloads the text encoder to CPU and frees several GB of VRAM.
+**ARDY additionally needs:**
+
+| Requirement | Notes |
+|---|---|
+| HuggingFace account | Its text encoder is built on the gated Meta-Llama-3-8B-Instruct |
+| ~25 GB disk | The encoder alone is ~16 GB |
+| CMake + a C++ compiler | *Optional.* Only needed for foot-skate cleanup — the installer detects this and continues without it, saying so in the panel |
+
+> **Low VRAM?** For Kimodo, run `kimodo_textencoder --device cpu` in a separate terminal with the Kimodo venv activated. For ARDY, set **Encoder** to *CPU (low VRAM)* in the Connection panel — its GPU encoder needs ~14 GB of VRAM on its own.
 
 ---
 
@@ -85,9 +115,24 @@ Progress is shown live in the Connection panel. The full log is printed to the s
 
 > **Requires:** Python 3.10–3.12 on your system PATH, internet access, and ~10 GB of free disk space. After the initial install, Kimodo runs fully offline.
 
+### Installing ARDY
+
+Switch the **Connection** panel to **ARDY** and follow the checklist it shows.
+
+Before the Install button unlocks you need a HuggingFace token with Llama 3 access — the panel links both pages directly:
+
+1. Open the **Meta-Llama-3-8B-Instruct** page and accept the licence (free; approval is usually quick).
+2. Create a **read** token in your HuggingFace token settings.
+3. Paste it into the token field in the panel.
+4. Click **Install ARDY (Auto)** and pick a folder.
+
+The installer then creates a venv, installs PyTorch matched to your GPU, installs ARDY, downloads the text encoder and the `ARDY-Core-RP-20FPS-Horizon40` checkpoint, and sets the Python path. Access is verified up front, so a missing licence fails in seconds rather than after a long download.
+
+If CMake and a C++ compiler are not found, ARDY is installed without its motion-correction extension: everything works except foot-skate cleanup, and the panel tells you so. Install both and reinstall to enable it.
+
 ### Manual installation (advanced)
 
-If you already have Kimodo installed in your own venv, skip the auto-installer and paste the path to your venv Python into the **Kimodo Python** field in the Connection panel.
+If you already have Kimodo or ARDY installed in your own venv, skip the auto-installer and paste the path to your venv Python into the **Kimodo Python** / **ARDY Python** field under *Connection ▸ Advanced*.
 
 ---
 
@@ -102,7 +147,7 @@ If you already have Kimodo installed in your own venv, skip the auto-installer a
 
 3. A `Kimodo_Source` armature will appear in your scene with the generated motion applied.
 
-> **30 FPS tip:** Kimodo always generates at 30 FPS. If your scene is set to a different frame rate, an alert will appear above the Generate button with a **Set to 30 FPS** button.
+> **Frame-rate tip:** Kimodo always generates at 30 FPS and ARDY Core at 20. If your scene is set to a different frame rate, an alert appears above the Generate button with a one-click fix.
 
 ### Use multiple segments
 
@@ -155,7 +200,7 @@ To add a constraint:
 
 | Panel | What's in it |
 |---|---|
-| **Connection** | Kimodo Python path, model selector, Start / Stop bridge |
+| **Connection** | Backend selector, install / Python path, model selector, Start / Stop bridge |
 | **Generate** | Single Clip mode (one prompt, duration, seed) or Timeline mode (segment list, frame ranges) — one Generate Motion button either way |
 | **Motion Constraints** | Spatial waypoints for the generated motion |
 | **Retarget** | Bone mapping, Apply Constraints, Bake |
@@ -178,7 +223,13 @@ To add a constraint:
 - Make sure the source and target armatures are both in their rest pose / have the same pose before trying the retargeting, and have scale applied on the armature.
 
 **Frames from imorted animation dont match**
-- Kimodo generates at exactly 30 FPS. Use the **Set to 30 FPS** button that appears in the Generate panel when your scene is at a different frame rate.
+- Kimodo generates at exactly 30 FPS, ARDY Core at 20. Use the frame-rate button that appears in the Generate panel when your scene does not match.
+
+**ARDY: "HuggingFace refused this token"**
+- The text encoder needs Meta-Llama-3-8B-Instruct access. Open the model page from the Connection panel, accept the licence, wait for approval, and check the token has read permission.
+
+**ARDY: "Foot-skate cleanup unavailable"**
+- ARDY was installed without its motion-correction extension because CMake and a C++ compiler were not found. Generation works; only the foot-skate pass is missing. Install CMake and a C++ compiler (`build-essential` on Ubuntu, Visual Studio Build Tools on Windows), then reinstall ARDY.
 
 ---
 
@@ -188,7 +239,9 @@ To add a constraint:
 |---|---|
 | `__init__.py` | Blender addon entry point |
 | `bridge_server.py` | Subprocess: loads Kimodo, handles generation requests |
-| `subprocess_client.py` | Blender-side bridge manager |
+| `ardy_bridge.py` | Subprocess: same protocol, backed by ARDY |
+| `ardy_bvh.py` | BVH writer for ARDY output (ARDY ships no BVH exporter) |
+| `subprocess_client.py` | Blender-side bridge manager (both backends) |
 | `operators.py` | All `bpy.ops.kimodo.*` operators |
 | `properties.py` | All `bpy.props` scene settings |
 | `panels.py` | N-panel UI |
@@ -196,6 +249,8 @@ To add a constraint:
 | `retarget.py` | Applies / bakes retargeting constraints |
 | `ui_list.py` | UIList helper for the bone mapping panel |
 | `setup_operator.py` | One-click auto-installer for Kimodo and all dependencies |
+| `ardy_setup.py` | One-click auto-installer for ARDY |
+| `tests/` | Blender-free checks — see [`tests/README.md`](tests/README.md) |
 
 ---
 
