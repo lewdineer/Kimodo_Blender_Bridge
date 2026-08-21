@@ -28,7 +28,7 @@ Requirements:
 bl_info = {
     "name":        "Kimodo Blender Bridge",
     "author":      "Lewdineer",
-    "version":     (1, 6, 1),
+    "version":     (1, 7, 0),
     "blender":     (4, 2, 0),
     "location":    "View3D › Sidebar (N-Panel) › Kimodo",
     "description": "Generate human motion with NVIDIA Kimodo or ARDY. "
@@ -45,6 +45,7 @@ import bpy
 from . import properties, operators, ui_list, panels, constraints, timeline
 from . import setup_operator
 from . import ardy_setup
+from . import ardy_stream
 from . import subprocess_client as sc
 
 
@@ -53,6 +54,7 @@ def register():
     operators.register()
     setup_operator.register()
     ardy_setup.register()
+    ardy_stream.register()
     ui_list.register()
     panels.register()
     timeline.register()
@@ -64,6 +66,7 @@ def unregister():
     timeline.unregister()
     panels.unregister()
     ui_list.unregister()
+    ardy_stream.unregister()
     ardy_setup.unregister()
     setup_operator.unregister()
     operators.unregister()

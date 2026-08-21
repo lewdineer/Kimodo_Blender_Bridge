@@ -384,6 +384,54 @@ class KIMODO_SceneSettings(PropertyGroup):
         default=0, min=0, max=600,
     )
 
+    # --- Live streaming (ARDY only) ---
+    ardy_stream_target: PointerProperty(
+        name="Follow",
+        description="Object the character walks toward while the stream runs. "
+                    "Move it during playback and the motion re-plans to follow "
+                    "it. Leave empty to just generate to the prompt",
+        type=bpy.types.Object,
+    )
+    ardy_stream_replan_buffer: IntProperty(
+        name="Commit Frames",
+        description="Frames ahead of the playhead that are locked in. Lower "
+                    "reacts to the target sooner; too low and motion about to "
+                    "play gets rewritten under you, which shows up as popping",
+        default=8, min=0, max=120,
+    )
+    ardy_stream_lead_frames: IntProperty(
+        name="Buffer Frames",
+        description="How far ahead of the playhead to keep generating. Raise "
+                    "it if playback keeps stalling to wait for the GPU",
+        default=30, min=4, max=300,
+    )
+    ardy_stream_diffusion_steps: IntProperty(
+        name="Steps",
+        description="Denoising steps per streamed window. This is the main "
+                    "latency dial: a live stream has to finish a window faster "
+                    "than the window plays, so it wants far fewer steps than a "
+                    "one-shot generation. Raise it if the motion looks noisy "
+                    "and your GPU has headroom",
+        default=8, min=1, max=100,
+    )
+    ardy_stream_max_speed: FloatProperty(
+        name="Walk Speed",
+        description="How fast the waypoint path advances toward the target, in "
+                    "metres per second. The prompt still decides the gait — "
+                    "this only sets how far ahead the target is chased",
+        default=1.6, min=0.1, max=8.0,
+    )
+    ardy_stream_autoplay: BoolProperty(
+        name="Play While Streaming",
+        description="Start timeline playback when the stream starts, and pause "
+                    "it automatically whenever generation falls behind",
+        default=True,
+    )
+
+    # Live stream state (read by the panel, written by the modal operator)
+    is_streaming: BoolProperty(default=False)
+    stream_status: StringProperty(default="")
+
     python_executable: StringProperty(
         name="Python",
         description=(
@@ -697,6 +745,14 @@ def _reset_transient_generation_state() -> None:
             k.generation_progress = ""
         if k.generating_segment_index != -1:
             k.generating_segment_index = -1
+        # A live stream cannot survive a file load either: the modal operator
+        # and the bridge-side motion state are both gone, so a saved
+        # is_streaming=True would leave the panel showing "Stop Stream" for a
+        # stream nothing can stop.
+        if k.is_streaming:
+            k.is_streaming = False
+        if k.stream_status:
+            k.stream_status = ""
 
 
 @bpy.app.handlers.persistent

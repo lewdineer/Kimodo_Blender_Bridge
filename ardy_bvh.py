@@ -69,8 +69,14 @@ def _depth_first_order(root: int, kids: "dict[int, list[int]]") -> "list[int]":
     return order
 
 
-def _skeleton_tables(skeleton):
-    """Pull (names, parents, offsets_cm, root_idx) off an ARDY skeleton."""
+def rest_tables(skeleton):
+    """(names, parents, offsets_m, root_idx) for an ARDY skeleton, in metres.
+
+    Bone-local offsets: each joint's rest position relative to its parent, which
+    is what both a BVH OFFSET and a Blender edit bone want. Metres is ARDY's own
+    unit — ``_skeleton_tables`` scales to centimetres for BVH, while the live
+    stream builds its armature straight from these and keeps the scene metric.
+    """
     names = list(skeleton.bone_order_names)
     parents = [int(p) for p in _to_numpy(skeleton.joint_parents).reshape(-1)]
     neutral = _to_numpy(skeleton.neutral_joints).reshape(len(names), 3)
@@ -78,7 +84,13 @@ def _skeleton_tables(skeleton):
     offsets = np.zeros_like(neutral)
     for idx, parent in enumerate(parents):
         offsets[idx] = neutral[idx] if parent < 0 else neutral[idx] - neutral[parent]
-    return names, parents, offsets * _SCALE, int(skeleton.root_idx)
+    return names, parents, offsets, int(skeleton.root_idx)
+
+
+def _skeleton_tables(skeleton):
+    """Pull (names, parents, offsets_cm, root_idx) off an ARDY skeleton."""
+    names, parents, offsets, root_idx = rest_tables(skeleton)
+    return names, parents, offsets * _SCALE, root_idx
 
 
 def _write_hierarchy(out, idx, names, parents, offsets, kids, root_idx, depth):

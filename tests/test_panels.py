@@ -135,6 +135,24 @@ for backend in ('KIMODO', 'ARDY'):
             prefs = FakePrefs()
             ctx = FakeContext(FakeScene(s), prefs)
             for cls in PANELS:
+                # A panel with a poll() that rejects this context is never
+                # drawn by Blender, so respect it here rather than exercising
+                # a code path the user cannot reach.
+                poll = getattr(cls, "poll", None)
+                visible = True
+                if poll is not None:
+                    try:
+                        visible = bool(poll(ctx))
+                    except Exception as exc:
+                        check(False, f"{cls.__name__}.poll raises: {exc}")
+                        continue
+                if cls.__name__ == "KIMODO_PT_LiveStream":
+                    check(visible == (backend == 'ARDY'),
+                          f"  Live Stream panel visible only for ARDY "
+                          f"[{backend}]")
+                if not visible:
+                    continue
+
                 panel = cls()
                 sink = {"labels": [], "props": [], "ops": []}
                 panel.layout = FakeLayout(sink)
@@ -161,6 +179,14 @@ for backend in ('KIMODO', 'ARDY'):
                               "  Kimodo view shows the Kimodo model picker")
                         check("ardy_model" not in sink["props"],
                               "  Kimodo view does not show the ARDY model picker")
+                if cls.__name__ == "KIMODO_PT_LiveStream":
+                    check("kimodo.ardy_stream" in sink["ops"],
+                          "  Live Stream offers the start operator")
+                    check("ardy_stream_target" in sink["props"],
+                          "  Live Stream exposes the follow target")
+                    check("ardy_stream_diffusion_steps" in sink["props"],
+                          "  Live Stream exposes the latency dial")
+
                 if cls.__name__ == "KIMODO_PT_Generate":
                     joined = " ".join(sink["labels"])
                     want = "20" if backend == 'ARDY' else "30"

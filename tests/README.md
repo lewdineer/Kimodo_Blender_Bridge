@@ -17,9 +17,10 @@ suite from a normal Python interpreter, **not** from inside Blender — the mock
 | Module | Covers | Needs |
 |---|---|---|
 | `test_ardy_bvh.py` | The BVH writer ARDY does not ship. Builds a Core27 skeleton, writes a BVH, parses it back with an independent reader, and compares world joint positions against forward kinematics. Also checks channel order, End Sites on every leaf, centimetre units and frame time. | numpy, scipy |
-| `test_ardy_bridge.py` | `ardy_bridge.py` driven as a real subprocess over its JSON protocol: startup handshake, single-clip and timeline generation, constraint pass-through, exact frame counts, malformed input, and that the request loop survives errors. The mock model re-asserts the released model's own contract. | torch |
+| `test_ardy_bridge.py` | `ardy_bridge.py` driven as a real subprocess over its JSON protocol: startup handshake, single-clip and timeline generation, constraint pass-through, exact frame counts, malformed input, and that the request loop survives errors. Also the live-stream commands — replan arithmetic, history alignment, prompt-encoding cache, and that `stream_end` really drops the state. The mock model re-asserts the released model's own contract. | torch |
 | `test_addon_registration.py` | Registering the add-on: every operator and property present, no duplicate `bl_idname`s, the Core skeleton tables matching ARDY's real `CoreSkeleton27`, the deletion guard refusing non-venv paths, and the PyTorch index picked per GPU. | — |
-| `test_panels.py` | Every panel drawn across backend × mode × connected, asserting the backend-specific UI lands in the right view (FPS warning, model picker, T-pose option). | — |
+| `test_ardy_steer.py` | The streaming steering geometry: one waypoint per generated frame, the arrival dead zone, the speed cap, no overshoot, easing out of the current velocity instead of snapping, and the ARDY ↔ Blender change of basis. Pure maths, no dependencies. | — |
+| `test_panels.py` | Every panel drawn across backend × mode × connected, asserting the backend-specific UI lands in the right view (FPS warning, model picker, T-pose option) and that `poll()` hides the ARDY-only Live Stream panel on Kimodo. | — |
 
 A module whose dependency is missing is **skipped**, not failed, so the suite
 still runs on a machine without the model stack.

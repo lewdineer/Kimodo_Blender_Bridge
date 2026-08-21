@@ -281,6 +281,7 @@ Being honest about the upside, since issue #52 claims it is "better than kimodo"
 
 - **Streaming / interactive generation.** ARDY is autoregressive, so motion can extend
   indefinitely and react to prompt changes mid-stream. Kimodo generates a fixed clip.
+  **Shipped in 1.7.0** as the Live Stream panel — see §5.1.
 - **Faster response.** Real-time on an RTX 4090, with TensorRT and `torch.compile`
   acceleration paths. Kimodo's 100-step diffusion is offline by comparison.
 - **Toes and Mixamo-style names** out of the box on Core27 — relevant to issue #49.
@@ -288,6 +289,44 @@ Being honest about the upside, since issue #52 claims it is "better than kimodo"
 
 Against that, today: no SOMA checkpoint, no BVH export, 20 FPS, gated encoder, harder install.
 "Better" is not yet true *for this add-on's use case* — it is true for the interactive one.
+
+### 5.1 Live streaming, as built (1.7.0)
+
+The Live Stream panel drives `Ardy.autoregressive_step()` from Blender's playhead. The design
+follows the interactive demo closely, because the demo is the only reference for how ARDY is
+meant to be run continuously.
+
+**The replan is the whole trick.** `GenerationMixin._get_history_motion`
+(`scripts/interactive_demo/generation.py` :157-178) sets
+`history_end_idx = min(cur_motion_len - 1, frame_idx + replan_buffer_size)` — every step
+*discards already-generated future motion* just ahead of the playhead and regenerates it against
+the current constraints. That is what makes moving a target feel live rather than queued, and it
+maps onto Blender as `frame_idx = scene.frame_current - stream_start_frame`, with the discarded
+frames' keyframes overwritten in place. `ardy_stream_replan_buffer` is that commit window.
+
+**Steering is a path, not a waypoint.** Pinning one constraint at the end of the horizon asks
+the model to teleport and fights the motion prior. The demo instead projects future root
+positions from a target velocity, easing out of the current velocity
+(`_update_root_constraints_from_target_velocity`, `gen_constraints.py` :156). `ardy_steer.py` is
+that idea reduced to "steer toward a point", kept free of torch/numpy/bpy so it is unit-testable.
+
+**Protocol.** `stream_begin` / `stream_step` / `stream_end`, one request and one reply each — no
+server push, so the client's threading, cancellation and single-in-flight rules did not change
+and Kimodo's path was untouched. Frames cross the pipe as axis-angle (joints × 3 floats per
+frame, a few KB per window).
+
+**The rest pose is deliberately plain.** The stream armature's bones all point +Y with zero
+roll, which makes every bone's rest rotation the identity — so a pose bone's quaternion *is*
+ARDY's local joint rotation, with no per-bone change of basis. An oriented rest (as a BVH import
+produces) would need every rotation conjugated by `bone.matrix_local`, and an error there is
+silent and subtly wrong rather than loud. The cost is cosmetic; the rig's job is to drive a
+retarget.
+
+**Known limits.** Latency is the binding constraint: a window must generate faster than it
+plays (0.4 s for `core8`, 2 s for the 40-frame default). When it does not, playback pauses
+rather than running into un-keyframed frames. `ardy_stream_diffusion_steps` defaults to 8 for
+this reason. Whether a given GPU keeps up is not something the test suite can answer — the
+panel reports measured seconds-per-step so the user can see it directly.
 
 ---
 

@@ -37,6 +37,12 @@ class _MotionRep:
             "foot_contacts": torch.zeros(B, T, 4),
         }
 
+    def normalize(self, features):
+        return features
+
+    def unnormalize(self, features):
+        return features
+
     def create_conditions_from_constraints_batched(self, lst, lengths, to_normalize, device):
         T = int(lengths.max()); B = len(lengths)
         obs = torch.zeros(B, T, self.D, device=device)
@@ -89,6 +95,53 @@ class _Model:
         steps = math.ceil((num_frames - init_len) / self.gen_horizon_len)
         total = steps * self.gen_horizon_len + init_len      # >= num_frames
 
+        out = torch.zeros(1, total, self.motion_rep.D)
+        if init_len:
+            out[:, :init_len] = init_history_sequence
+        eye = torch.eye(3).reshape(-1).repeat(self.motion_rep.J)
+        for t in range(init_len, total):
+            out[0, t, :3] = torch.tensor([0.01 * t, 0.9, 0.0])
+            out[0, t, 3:] = eye
+        return out
+
+
+    def _encode_text(self, texts):
+        assert isinstance(texts, list) and texts, texts
+        _record("encode_text", dict(text=texts[0]))
+        feat = torch.zeros(len(texts), 4, 16)
+        pad = torch.ones(len(texts), 4, dtype=torch.bool)
+        return feat, pad
+
+    def autoregressive_step(self, num_frames, num_denoising_steps, motion_mask,
+                            observed_motion, cfg_weight=None, texts=None,
+                            text_feat=None, text_pad_mask=None,
+                            init_history_sequence=None,
+                            init_global_translation=None,
+                            init_first_heading_angle=None, **kw):
+        """Mirror the real autoregressive_step's contract.
+
+        The asserts are the point: num_frames must be a whole number of tokens,
+        the window is history + one horizon, and conditioning tensors must match
+        that window exactly. Each is a mistake the bridge could plausibly make.
+        """
+        assert num_frames % self.num_frames_per_token == 0, \
+            f"num_frames {num_frames} is not a multiple of {self.num_frames_per_token}"
+        assert 1 <= num_denoising_steps <= self.diffusion.num_base_steps
+        assert texts is None and text_feat is not None, \
+            "streaming should reuse a cached text encoding"
+        init_len = 0 if init_history_sequence is None else int(init_history_sequence.shape[1])
+        if init_len:
+            assert init_len % self.num_frames_per_token == 0
+        if motion_mask is not None:
+            assert motion_mask.shape[1] == num_frames, \
+                f"motion_mask len {motion_mask.shape[1]} != num_frames {num_frames}"
+            assert observed_motion.shape[1] == num_frames
+        _record("ar_step", dict(num_frames=num_frames, hist=init_len,
+                                steps=num_denoising_steps,
+                                constrained=motion_mask is not None,
+                                cfg=list(cfg_weight) if cfg_weight else None))
+
+        total = init_len + self.gen_horizon_len
         out = torch.zeros(1, total, self.motion_rep.D)
         if init_len:
             out[:, :init_len] = init_history_sequence

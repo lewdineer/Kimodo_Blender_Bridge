@@ -157,6 +157,76 @@ check(read_until("error")[-1]["status"] == "error", "bad JSON line -> error, loo
 send({"cmd": "ping"})
 check(read_until("pong")[-1]["status"] == "pong", "bridge still alive after errors")
 
+# --- live streaming ------------------------------------------------------
+# A stream_step before stream_begin must be refused, not crash the loop.
+send({"cmd": "stream_step", "frame_idx": 0})
+check(read_until("error")[-1]["status"] == "error",
+      "stream_step without stream_begin -> error")
+
+send({"cmd": "stream_begin", "prompt": "a person walks forward", "seed": 3,
+      "diffusion_steps": 6, "replan_buffer": 4, "max_speed": 1.6})
+begun = read_until("stream_ready", "error")[-1]
+check(begun["status"] == "stream_ready", f"stream opens ({begun.get('message','')})")
+check(begun["gen_horizon_len"] == 40, "reports the generation horizon")
+check(begun["fps"] == 20.0, "reports the streaming frame rate")
+check(len(begun["bone_names"]) == len(begun["parents"]) == len(begun["rest_offsets"]),
+      "rest skeleton tables agree in length")
+check(begun["bone_names"][begun["root_idx"]] == "Hips",
+      "root index points at the root bone")
+check(begun["parents"][begun["root_idx"]] < 0, "the root has no parent")
+
+# First step: no history yet, so it starts at frame 0.
+send({"cmd": "stream_step", "frame_idx": 0, "target_xz": [2.0, 3.0]})
+first = read_until("frames", "error")[-1]
+check(first["status"] == "frames", f"first step returns frames ({first.get('message','')})")
+check(first["start_index"] == 0, "the first window starts at frame 0")
+check(first["frames"] == 40, f"a window is one horizon of frames (got {first['frames']})")
+check(len(first["local_rot_aa"]) == first["frames"], "one rotation row per frame")
+check(len(first["local_rot_aa"][0]) == len(begun["bone_names"]) * 3,
+      "each row is axis-angle per joint")
+check(len(first["root_positions"]) == first["frames"], "one root position per frame")
+
+step1 = events("ar_step")[-1]
+check(step1["hist"] == 0, "the first step has no history")
+check(step1["steps"] == 6, "the requested denoising steps are honoured")
+check(step1["constrained"] is True, "a follow target reaches the model as conditioning")
+
+encodes = len(events("encode_text"))
+
+# Second step from a playhead inside the generated range: the replan must
+# start just ahead of the playhead, not at the end of what exists.
+send({"cmd": "stream_step", "frame_idx": 10, "target_xz": [2.0, 3.0]})
+second = read_until("frames", "error")[-1]
+check(second["status"] == "frames", "second step returns frames")
+check(second["start_index"] == 15,
+      f"replan starts at playhead + commit buffer (got {second['start_index']})")
+step2 = events("ar_step")[-1]
+check(step2["hist"] > 0, "the second step feeds history back in")
+check(step2["hist"] % 4 == 0, "history is a whole number of tokens")
+check(len(events("encode_text")) == encodes,
+      "an unchanged prompt is not re-encoded")
+
+# A new prompt must re-encode; an identical one must not.
+send({"cmd": "stream_step", "frame_idx": 20, "prompt": "a person runs"})
+read_until("frames", "error")
+check(len(events("encode_text")) == encodes + 1, "a changed prompt is re-encoded")
+
+# No target: the model runs unconditioned rather than being pinned in place.
+send({"cmd": "stream_step", "frame_idx": 30, "target_xz": None})
+read_until("frames", "error")
+check(events("ar_step")[-1]["constrained"] is False,
+      "no follow target means no root conditioning")
+
+send({"cmd": "stream_end"})
+check(read_until("stream_closed", "error")[-1]["status"] == "stream_closed",
+      "stream closes")
+send({"cmd": "stream_step", "frame_idx": 0})
+check(read_until("error")[-1]["status"] == "error",
+      "stepping after stream_end -> error, state really was dropped")
+
+send({"cmd": "ping"})
+check(read_until("pong")[-1]["status"] == "pong", "bridge alive after a stream")
+
 send({"cmd": "quit"})
 read_until("bye")
 proc.wait(timeout=10)

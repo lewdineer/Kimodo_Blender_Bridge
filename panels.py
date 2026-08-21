@@ -716,7 +716,80 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
 
 
 # ---------------------------------------------------------------------------
-# Panel 3: Motion Constraints
+# Panel 3: Live Stream (ARDY only)
+# ---------------------------------------------------------------------------
+
+class KIMODO_PT_LiveStream(KIMODO_PanelBase, Panel):
+    bl_label   = "📡  Live Stream"
+    bl_idname  = "KIMODO_PT_LiveStream"
+    bl_order   = 20
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        # Kimodo is one-shot: it has no autoregressive entry point to stream
+        # from, so the whole panel only makes sense on the ARDY backend.
+        return context.scene.kimodo.backend == 'ARDY'
+
+    def draw(self, context):
+        layout = self.layout
+        s = context.scene.kimodo
+
+        if s.is_streaming:
+            box = layout.box()
+            box.label(text=s.stream_status or "Streaming…", icon='REC')
+            col = layout.column()
+            col.scale_y = 1.6
+            col.operator("kimodo.ardy_stream_stop", text="⏹  Stop Stream", icon='X')
+            layout.separator(factor=0.5)
+            layout.label(text="Move the target and the motion re-plans to follow.",
+                         icon='INFO')
+            layout.label(text="Esc also stops the stream.", icon='BLANK1')
+            return
+
+        layout.label(text="Generate while the timeline plays.", icon='INFO')
+        layout.separator(factor=0.5)
+
+        layout.prop(s, "prompt", text="Prompt")
+        target_row = layout.row(align=True)
+        target_row.prop(s, "ardy_stream_target", text="Follow", icon='EMPTY_ARROWS')
+        if s.ardy_stream_target is None:
+            layout.label(text="No target: walks to the prompt alone.", icon='BLANK1')
+
+        layout.separator(factor=0.5)
+        col = layout.column(align=True)
+        col.prop(s, "ardy_stream_diffusion_steps")
+        col.prop(s, "ardy_stream_max_speed")
+        col.prop(s, "ardy_stream_replan_buffer")
+        col.prop(s, "ardy_stream_lead_frames")
+        layout.prop(s, "ardy_stream_autoplay")
+
+        layout.separator(factor=0.5)
+        row = layout.column()
+        row.enabled = s.is_connected and not s.is_generating
+        row.scale_y = 2
+        row.operator("kimodo.ardy_stream", text="Start Live Stream",
+                     icon='PLAY' if s.is_connected else 'UNLINKED')
+
+        if s.stream_status and not s.is_streaming:
+            layout.label(text=s.stream_status, icon='INFO')
+
+        # Streaming rewrites the near future every step, so it only looks right
+        # when the scene plays at the model's own rate.
+        scene_fps = context.scene.render.fps / context.scene.render.fps_base
+        model_fps = float(s.native_fps)
+        if abs(scene_fps - model_fps) > 0.01:
+            warn = layout.box()
+            warn.alert = True
+            warn.label(text=f"Scene is {scene_fps:.4g} FPS — ARDY streams at "
+                            f"{model_fps:.4g}", icon='ERROR')
+            warn.operator("kimodo.set_to_30fps",
+                          text=f"Set to {int(round(model_fps))} FPS",
+                          icon='RECOVER_LAST')
+
+
+# ---------------------------------------------------------------------------
+# Panel 4: Motion Constraints
 # ---------------------------------------------------------------------------
 
 class KIMODO_PT_Constraints(KIMODO_PanelBase, Panel):
@@ -996,6 +1069,7 @@ class KIMODO_PT_Help(KIMODO_PanelBase, Panel):
 _classes = [
     KIMODO_PT_Connection,
     KIMODO_PT_Generate,
+    KIMODO_PT_LiveStream,
     KIMODO_PT_Constraints,
     KIMODO_PT_Retarget,
     KIMODO_PT_Help,

@@ -367,6 +367,50 @@ def _recv_until_done(progress_callback) -> "tuple[bool, str]":
             return False, msg.get("message", "Generation failed")
 
 
+def _recv_until_status(terminal, progress_callback=None,
+                       timeout: float = 300.0) -> "tuple[bool, dict | str]":
+    """Read until a message whose status is in *terminal*; returns (ok, msg).
+
+    The sibling of _recv_until_done for commands whose reply is data rather
+    than a file path — the streaming ones. On failure the second element is an
+    error string instead of the message.
+
+    Unlike _recv_until_done this does not watch _cancel_requested: cancellation
+    belongs to a long generate, whereas a stream is ended by its own operator
+    calling stream_end, and a step is short enough to simply finish.
+    """
+    global _busy
+    deadline = time.monotonic() + timeout
+    while True:
+        if not is_running():
+            with _lock:
+                _busy = False
+            label = "ARDY" if _backend == "ardy" else "Kimodo"
+            return False, f"{label} process died."
+
+        if time.monotonic() > deadline:
+            with _lock:
+                _busy = False
+            return False, f"Timed out after {timeout:.0f}s waiting for the bridge."
+
+        msg = _recv(timeout=0.2)
+        if msg is None:
+            continue
+
+        s = msg.get("status", "")
+        if s == "progress":
+            if progress_callback:
+                progress_callback(msg.get("message", ""))
+        elif s == "error":
+            with _lock:
+                _busy = False
+            return False, msg.get("message", "Bridge reported an error")
+        elif s in terminal:
+            with _lock:
+                _busy = False
+            return True, msg
+
+
 def _begin_request(req: dict) -> "str | None":
     """Mark the pipe busy and send the request. Returns an error message on
     failure, None on success."""
@@ -489,6 +533,83 @@ def generate_motion_multi(
         return False, err
 
     return _recv_until_done(progress_callback)
+
+
+# ---------------------------------------------------------------------------
+# Live streaming (ARDY only)
+# ---------------------------------------------------------------------------
+#
+# One request, one reply — no server push. The bridge holds the motion state
+# between steps, so all that crosses the pipe is "here is the playhead and
+# where the target is now", answered with one window of frames.
+
+def stream_begin(
+    prompt: str,
+    seed: int,
+    diffusion_steps: int,
+    replan_buffer: int,
+    cfg_text_weight: "float | None" = None,
+    cfg_constraint_weight: "float | None" = None,
+    history_frames: "int | None" = None,
+    max_speed: float = 1.6,
+) -> "tuple[bool, dict | str]":
+    """Open a stream. Returns (True, stream_ready message) with the rest skeleton."""
+    if not is_running():
+        return False, "ARDY is not running — click 'Start ARDY' first."
+    if _backend != "ardy":
+        return False, "Live streaming needs the ARDY backend."
+
+    req = {
+        "cmd": "stream_begin",
+        "prompt": prompt,
+        "seed": seed if seed >= 0 else None,
+        "diffusion_steps": diffusion_steps,
+        "replan_buffer": replan_buffer,
+        "max_speed": max_speed,
+        **_ardy_extras(cfg_text_weight, cfg_constraint_weight, history_frames),
+    }
+    err = _begin_request(req)
+    if err:
+        return False, err
+    return _recv_until_status({"stream_ready"})
+
+
+def stream_step(
+    frame_idx: int,
+    target_xz: "list[float] | None" = None,
+    target_heading: "float | None" = None,
+    prompt: "str | None" = None,
+    timeout: float = 120.0,
+) -> "tuple[bool, dict | str]":
+    """Advance the stream one window. Returns (True, frames message).
+
+    Must be called from a background thread: a step is a diffusion pass and
+    blocking Blender's main thread on it would freeze the viewport.
+    """
+    if not is_running():
+        return False, "ARDY is not running."
+
+    req = {
+        "cmd": "stream_step",
+        "frame_idx": int(frame_idx),
+        "target_xz": target_xz,
+        "target_heading": target_heading,
+        "prompt": prompt,
+    }
+    err = _begin_request(req)
+    if err:
+        return False, err
+    return _recv_until_status({"frames"}, timeout=timeout)
+
+
+def stream_end() -> "tuple[bool, dict | str]":
+    """Close the stream and let the bridge drop its motion state."""
+    if not is_running():
+        return True, {"status": "stream_closed"}
+    err = _begin_request({"cmd": "stream_end"})
+    if err:
+        return False, err
+    return _recv_until_status({"stream_closed"}, timeout=30.0)
 
 
 # ---------------------------------------------------------------------------

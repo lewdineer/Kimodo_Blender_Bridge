@@ -160,6 +160,29 @@ Switch the **Generate** panel to **Timeline** mode for this. Each segment is an 
 <img width="2676" height="1181" alt="image" src="https://github.com/user-attachments/assets/a5d336e9-f32f-44c7-9aca-a09983e869d6" />
 
 
+### Follow a moving target live (ARDY only)
+
+Instead of generating a fixed-length clip, ARDY can generate *while the timeline plays* and steer toward an object you move around the scene.
+
+1. Switch the backend to **ARDY** and click **Start ARDY**.
+2. Add an Empty somewhere in the scene.
+3. Open the **Live Stream** panel, type a prompt, and set **Follow** to your Empty.
+4. Click **Start Live Stream**. Playback begins and the character walks toward the Empty.
+5. Drag the Empty while it plays — the motion re-plans and the character changes course.
+6. Press **Stop Stream** (or `Esc`) when you have what you want.
+
+The frames are ordinary keyframes on an ordinary armature, so once you stop, the result behaves exactly like a generated clip — including **Retarget**.
+
+Why this only exists for ARDY: it is autoregressive, generating one short window at a time on top of what came before. Kimodo generates a whole clip in one call, so there is nothing to steer mid-flight.
+
+**If playback keeps stalling**, the GPU is not finishing a window faster than the window plays. In order of effect:
+
+- Lower **Steps** — this is the main latency dial.
+- Raise **Buffer Frames** so more motion is generated ahead of the playhead.
+- Use the `core8` checkpoint (8-frame windows) instead of the default 40-frame one.
+
+**If the character reacts sluggishly** to the target, lower **Commit Frames** — that is how much of the near future is locked in and cannot be re-planned.
+
 ### Retarget to your own rig
 
 After generating motion you can drive any armature from the Kimodo source:
@@ -202,6 +225,7 @@ To add a constraint:
 |---|---|
 | **Connection** | Backend selector, install / Python path, model selector, Start / Stop bridge |
 | **Generate** | Single Clip mode (one prompt, duration, seed) or Timeline mode (segment list, frame ranges) — one Generate Motion button either way |
+| **Live Stream** | ARDY only: follow-target, streaming controls, Start / Stop |
 | **Motion Constraints** | Spatial waypoints for the generated motion |
 | **Retarget** | Bone mapping, Apply Constraints, Bake |
 | **Help** | Quick-start checklist, VRAM tip |
@@ -241,6 +265,8 @@ To add a constraint:
 | `bridge_server.py` | Subprocess: loads Kimodo, handles generation requests |
 | `ardy_bridge.py` | Subprocess: same protocol, backed by ARDY |
 | `ardy_bvh.py` | BVH writer for ARDY output (ARDY ships no BVH exporter) |
+| `ardy_stream.py` | Live streaming: modal operator, armature build, keyframe writing |
+| `ardy_steer.py` | Pure maths for streaming: target steering, ARDY ↔ Blender space |
 | `subprocess_client.py` | Blender-side bridge manager (both backends) |
 | `operators.py` | All `bpy.ops.kimodo.*` operators |
 | `properties.py` | All `bpy.props` scene settings |

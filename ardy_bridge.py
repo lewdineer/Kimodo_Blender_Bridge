@@ -7,8 +7,10 @@ the managed ARDY venv, loads the model once, and answers JSON generation
 requests from stdin.  It speaks **exactly the same protocol** as the Kimodo
 bridge so subprocess_client.py does not care which backend is running.
 
-stdin  -> one JSON line per request:   {"cmd": "generate"|"generate_multi"|"ping"|"quit", ...}
-stdout -> one JSON line per message:   {"status": "loading"|"ready"|"progress"|"done"|"error", ...}
+stdin  -> one JSON line per request:   {"cmd": "generate"|"generate_multi"|"ping"|"quit"
+                                              |"stream_begin"|"stream_step"|"stream_end", ...}
+stdout -> one JSON line per message:   {"status": "loading"|"ready"|"progress"|"done"|"error"
+                                                 |"stream_ready"|"frames"|"stream_closed", ...}
 
 stderr is left alone (ARDY / PyTorch logging goes there).
 
@@ -26,6 +28,7 @@ Differences from Kimodo that this file absorbs so the add-on does not have to:
 """
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -59,6 +62,10 @@ class _Ctx:
         self.model = model
         self.device = device
         self.postprocess = postprocess
+        # The open live stream, if any (see _Stream). One at a time:
+        # the pipe already serialises requests, and a second stream
+        # would just be a second copy of the motion tensor on the GPU.
+        self.stream = None
 
         self.fps = float(model.motion_rep.fps)
         self.patch = int(model.num_frames_per_token)
@@ -98,8 +105,14 @@ class _Ctx:
 
 
 def _cfg_weight(req: dict):
-    """(text_weight, constraint_weight) from a request, defaulting to ARDY's 2.0/2.0."""
-    text_w = float(req.get("cfg_text_weight", 2.0))
+    """(text_weight, constraint_weight) from a request, defaulting to ARDY's 2.0/2.0.
+
+    The keys are always present but may be null — the client sends them
+    unconditionally so the Kimodo bridge can ignore them — so treat a null as
+    "not given" rather than letting float(None) raise.
+    """
+    raw_text = req.get("cfg_text_weight")
+    text_w = 2.0 if raw_text is None else float(raw_text)
     con_w = req.get("cfg_constraint_weight")
     return (text_w, float(con_w)) if con_w is not None else (text_w, text_w)
 
@@ -444,6 +457,263 @@ def _generate_multi(req: dict, ctx: _Ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Live streaming
+# ---------------------------------------------------------------------------
+
+class _Stream:
+    """State for one live streaming session.
+
+    Streaming is the same autoregressive loop the interactive demo runs
+    (scripts/interactive_demo/generation.py), reduced to one character and
+    driven by the Blender playhead instead of a viser client.
+
+    The important part is *replanning*: each step truncates the accumulated
+    motion just ahead of the playhead and regenerates from there, so moving the
+    target rewrites the near future rather than appending to a fixed plan. That
+    is what makes the character react while the timeline runs.
+    """
+
+    def __init__(self, ctx, req: dict):
+        self.ctx = ctx
+        self.text = _normalise_prompt(req.get("prompt", "A person walks forward."))
+        self.steps = ctx.clamp_steps(req.get("diffusion_steps"))
+        self.cfg = _cfg_weight(req)
+        self.history_frames = ctx.align_history(req.get("history_frames"))
+        # Frames ahead of the playhead that stay committed. Too small and the
+        # character rewrites motion that is about to be displayed (visible
+        # popping); too large and it reacts late.
+        self.replan_buffer = max(0, int(req.get("replan_buffer", ctx.patch)))
+        self.max_speed = float(req.get("max_speed", 1.6))
+
+        self.motion = None          # [1, T, D] accumulated *normalized* motion
+        self.root_xyz = None        # [1, T, 3] decoded root positions, for steering
+        self._text_feat = None
+        self._text_pad_mask = None
+
+    # -- text ---------------------------------------------------------------
+    def text_features(self, prompt):
+        """Encode the prompt, reusing the last encoding while it is unchanged.
+
+        Text encoding is the expensive part of a step (it is an 8B model), and
+        the prompt only changes when the user edits it, so caching it is what
+        keeps a step down to diffusion time.
+        """
+        text = _normalise_prompt(prompt) if prompt else self.text
+        if text != self.text or self._text_feat is None:
+            self.text = text
+            self._text_feat, self._text_pad_mask = self.ctx.model._encode_text([text])
+        return self._text_feat, self._text_pad_mask
+
+    # -- history ------------------------------------------------------------
+    def history_window(self, frame_idx: int):
+        """(init_history, history_end_idx, history_length) for a replan at *frame_idx*.
+
+        Mirrors GenerationMixin._get_history_motion: keep everything up to
+        ``frame_idx + replan_buffer``, discard the rest, and feed back at most
+        ``history_frames`` of it — patch-aligned, because the model tokenizes in
+        fixed-size chunks.
+        """
+        ctx = self.ctx
+        have = 0 if self.motion is None else int(self.motion.shape[1])
+        if have == 0:
+            return None, -1, 0
+
+        end_idx = min(have - 1, max(0, int(frame_idx)) + self.replan_buffer)
+        if have >= ctx.patch:
+            end_idx = max(end_idx, ctx.patch - 1)
+
+        length = min(end_idx + 1, self.history_frames)
+        length = (length // ctx.patch) * ctx.patch
+        if length <= 0:
+            return None, -1, 0
+
+        start_idx = max(0, end_idx - length + 1)
+        return self.motion[:, start_idx:end_idx + 1], end_idx, length
+
+    # -- steering -----------------------------------------------------------
+    def _root_state(self, at_idx: int):
+        """(position_xz, velocity_xz) of the root at an absolute frame index."""
+        if self.root_xyz is None or self.root_xyz.shape[1] == 0:
+            return (0.0, 0.0), (0.0, 0.0)
+        idx = max(0, min(int(at_idx), int(self.root_xyz.shape[1]) - 1))
+        cur = self.root_xyz[0, idx]
+        pos = (float(cur[0]), float(cur[2]))          # ARDY is Y-up: ground is xz
+        if idx == 0:
+            return pos, (0.0, 0.0)
+        prev = self.root_xyz[0, idx - 1]
+        vel = (float(cur[0] - prev[0]) * self.ctx.fps,
+               float(cur[2] - prev[2]) * self.ctx.fps)
+        return pos, vel
+
+    def steer_constraints(self, target_xz, target_heading, at_idx: int,
+                          history_length: int):
+        """Root waypoints toward *target_xz*, as add-on-format constraint JSON.
+
+        Frame indices are relative to the model call's window, offset past the
+        history so the already-fixed frames carry no constraint.
+        """
+        if target_xz is None:
+            return []
+        import ardy_steer
+
+        pos, vel = self._root_state(at_idx)
+        waypoints = ardy_steer.project_root_waypoints(
+            pos, vel, target_xz,
+            fps=self.ctx.fps,
+            num_frames=self.ctx.gen_horizon_len,
+            max_speed=self.max_speed,
+        )
+        if not waypoints:
+            return []
+
+        block = {
+            "type": "root2d",
+            "frame_indices": [history_length + off for off, _ in waypoints],
+            "smooth_root_2d": [xz for _, xz in waypoints],
+        }
+        heading = (target_heading if target_heading is not None
+                   else ardy_steer.heading_from_waypoints(waypoints))
+        if heading is not None:
+            block["global_root_heading"] = [
+                [math.cos(heading), math.sin(heading)] for _ in waypoints
+            ]
+        return [block]
+
+    # -- the step itself ----------------------------------------------------
+    def step(self, req: dict) -> dict:
+        import torch
+
+        ctx = self.ctx
+        frame_idx = int(req.get("frame_idx", 0))
+        target_xz = req.get("target_xz")
+        target_heading = req.get("target_heading")
+
+        init_history, end_idx, history_length = self.history_window(frame_idx)
+        start_index = end_idx + 1                 # absolute index of the first new frame
+
+        window = history_length + ctx.gen_horizon_len
+        if window % ctx.patch:                    # autoregressive_step asserts this
+            window = ((window + ctx.patch - 1) // ctx.patch) * ctx.patch
+
+        text_feat, text_pad_mask = self.text_features(req.get("prompt"))
+
+        blocks = self.steer_constraints(target_xz, target_heading,
+                                        end_idx if end_idx >= 0 else 0,
+                                        history_length)
+        constraint_lst = _load_constraints(json.dumps(blocks), ctx.model.skeleton) if blocks else []
+        observed, mask = _build_conditions(ctx, constraint_lst, window)
+
+        kwargs = dict(
+            num_frames=window,
+            num_denoising_steps=self.steps,
+            motion_mask=mask,
+            observed_motion=observed,
+            cfg_weight=self.cfg,
+            texts=None,
+            text_feat=text_feat,
+            text_pad_mask=text_pad_mask,
+            init_history_sequence=init_history,
+        )
+        if init_history is None:
+            kwargs["init_first_heading_angle"] = torch.zeros(1, device=ctx.device)
+
+        with torch.no_grad():
+            samples = ctx.model.autoregressive_step(**kwargs)
+            decoded = ctx.model.motion_rep.inverse(
+                ctx.model.motion_rep.unnormalize(samples), is_normalized=False,
+            )
+
+        new_samples = samples[:, history_length:]
+        new_decoded = {
+            k: (v[:, history_length:] if hasattr(v, "shape") and getattr(v, "ndim", 0) >= 2 else v)
+            for k, v in decoded.items()
+        }
+        if int(new_samples.shape[1]) == 0:
+            raise RuntimeError("stream_step produced no frames — aborting the stream")
+
+        new_decoded = _postprocess(ctx, new_decoded, constraint_lst)
+
+        # Splice: drop everything the replan discarded, then append.
+        if self.motion is None:
+            self.motion = new_samples
+            self.root_xyz = new_decoded["root_positions"]
+        else:
+            self.motion = torch.cat([self.motion[:, :start_index], new_samples], dim=1)
+            self.root_xyz = torch.cat(
+                [self.root_xyz[:, :start_index], new_decoded["root_positions"]], dim=1)
+
+        return self._encode_frames(new_decoded, start_index)
+
+    def _encode_frames(self, decoded, start_index: int) -> dict:
+        """Frames as JSON: axis-angle per joint plus the root position.
+
+        Axis-angle rather than matrices keeps a window at roughly a joint count
+        times three floats per frame — a few KB, small enough that the pipe is
+        never the bottleneck.
+        """
+        from ardy.tools import to_numpy
+        from ardy.geometry import matrix_to_axis_angle
+
+        local_aa = to_numpy(matrix_to_axis_angle(decoded["local_rot_mats"]))[0]
+        root = to_numpy(decoded["root_positions"])[0]
+        return {
+            "status": "frames",
+            "start_index": int(start_index),
+            "frames": int(local_aa.shape[0]),
+            "local_rot_aa": local_aa.reshape(local_aa.shape[0], -1).tolist(),
+            "root_positions": root.tolist(),
+        }
+
+
+def _stream_begin(req: dict, ctx: _Ctx) -> None:
+    from ardy.tools import seed_everything
+
+    seed = req.get("seed")
+    if seed is not None:
+        seed_everything(int(seed))
+
+    import ardy_bvh
+    stream = _Stream(ctx, req)
+    ctx.stream = stream
+
+    names, parents, offsets, root_idx = ardy_bvh.rest_tables(ctx.model.skeleton)
+    _out({
+        "status": "stream_ready",
+        "fps": ctx.fps,
+        "gen_horizon_len": ctx.gen_horizon_len,
+        "num_frames_per_token": ctx.patch,
+        "replan_buffer": stream.replan_buffer,
+        "skeleton": getattr(ctx.model.skeleton, "name", "?"),
+        "bone_names": names,
+        "parents": parents,
+        "rest_offsets": offsets.tolist(),
+        "root_idx": root_idx,
+    })
+
+
+def _stream_step(req: dict, ctx: _Ctx) -> None:
+    stream = getattr(ctx, "stream", None)
+    if stream is None:
+        _out({"status": "error",
+              "message": "No stream is open — send stream_begin first."})
+        return
+    _out(stream.step(req))
+
+
+def _stream_end(req: dict, ctx: _Ctx) -> None:
+    ctx.stream = None
+    # The accumulated motion is the only large allocation a stream holds; on a
+    # card that was tight to begin with, the next model call wants it back.
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    _out({"status": "stream_closed"})
+
+
+# ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
 
@@ -536,8 +806,15 @@ def main() -> None:
         elif cmd == "quit":
             _out({"status": "bye"})
             break
-        elif cmd in ("generate", "generate_multi"):
-            handler = _generate if cmd == "generate" else _generate_multi
+        elif cmd in ("generate", "generate_multi",
+                     "stream_begin", "stream_step", "stream_end"):
+            handler = {
+                "generate": _generate,
+                "generate_multi": _generate_multi,
+                "stream_begin": _stream_begin,
+                "stream_step": _stream_step,
+                "stream_end": _stream_end,
+            }[cmd]
             try:
                 handler(req, ctx)
             except Exception as exc:

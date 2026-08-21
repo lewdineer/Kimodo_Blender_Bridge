@@ -144,6 +144,33 @@ hinted = {n for n, _ in R._SOMA_BONE_MAP_HINTS} | {n for n, _ in R._CORE_EXTRA_H
 missing = sorted(core_names - hinted)
 check(not missing, f"every Core joint has a retarget hint (missing: {missing})")
 
+# --- transient state (#43, and the same trap for live streaming) ------------
+# is_generating / is_streaming are scene properties, so Blender saves them into
+# the .blend. A loaded file can never have a live job, and a saved True leaves
+# the UI stuck behind a button that can never finish.
+class _FakeK:
+    is_generating = True
+    generation_progress = "Working…"
+    generating_segment_index = 3
+    is_streaming = True
+    stream_status = "Streaming…"
+
+
+_scene = type("S", (), {"kimodo": _FakeK()})()
+_saved_scenes = bpy.data.scenes
+bpy.data.scenes = [_scene]
+try:
+    P._reset_transient_generation_state()
+finally:
+    bpy.data.scenes = _saved_scenes
+
+k = _scene.kimodo
+check(k.is_generating is False, "a loaded file never stays 'generating'")
+check(k.generation_progress == "", "  and its progress text is cleared")
+check(k.generating_segment_index == -1, "  and its segment index is cleared")
+check(k.is_streaming is False, "a loaded file never stays 'streaming'")
+check(k.stream_status == "", "  and its stream status is cleared")
+
 addon.unregister()
 check(bpy.REGISTERED == [], "unregister removes every class")
 

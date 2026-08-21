@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.7.0] — 2026-08-21
+
+### Added
+
+- **Live Stream: ARDY generates while the timeline plays** (#52): a new **Live Stream** panel (ARDY only) starts an open-ended generation instead of a fixed-length clip. Pick an object to follow, press *Start Live Stream*, and the character walks toward wherever that object currently is — move it during playback and the motion re-plans to follow. This is not a bake: ARDY is autoregressive, so the bridge holds the motion state and each step regenerates the near future against the target's live position. Frames land as ordinary keyframes on an ordinary armature, so when you stop the stream the result is a normal Action and the **Retarget** panel works on it unchanged. Kimodo has no autoregressive entry point, so the panel is hidden on that backend.
+- **Streaming controls**: *Steps* is the latency dial — a live window has to finish generating faster than it plays, so it defaults far lower (8) than one-shot generation; raise it if motion looks noisy and the GPU has headroom. *Walk Speed* sets how fast the waypoint path chases the target (the prompt still decides the gait). *Commit Frames* is how far ahead of the playhead is locked in: lower reacts sooner, too low and motion about to play gets rewritten under you. *Buffer Frames* is how far ahead to keep generating. The panel reports the buffer depth and measured seconds-per-step, and flags when the GPU is the limit.
+- **Graceful backpressure**: when generation falls behind the playhead, playback pauses with "Waiting for ARDY…" and resumes once the buffer refills, rather than playing into frames that have no keyframes yet and freezing the character mid-stride.
+- **Streaming bridge protocol**: `stream_begin` / `stream_step` / `stream_end` alongside the existing commands. Each step is still one request and one reply — no server push — so the client's threading, cancellation and single-in-flight rules are unchanged, and the Kimodo path is untouched. The prompt encoding is cached between steps (it is an 8B model), so editing the prompt mid-stream re-encodes and leaving it alone does not.
+- **Tests for all of it**: the steering geometry (`tests/test_ardy_steer.py`) and the streaming protocol driven over the real JSON pipe against a mock model, covering the replan arithmetic, history alignment, prompt-cache behaviour and that state is really dropped on `stream_end`. The suite now also pins the transient-state reset, so a saved `.blend` can no longer come back stuck mid-stream — the same trap that produced #43.
+
+### Fixed
+
+- **`cfg_text_weight: null` could crash a request**: the client always sends the ARDY guidance keys so the Kimodo bridge can ignore them, but the ARDY bridge read them with `float(req.get(..., 2.0))`, which raises on an explicit `null` rather than falling back to the default. Only reachable from the new streaming path today, but it was wrong for `generate` too.
+
 ## [1.6.1] — 2026-08-20
 
 ### Fixed
