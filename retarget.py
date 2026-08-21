@@ -86,6 +86,22 @@ _SMPLX_EXTRA_HINTS = [
 ]
 
 
+# ARDY's CoreSkeleton27 shares most of its names with the table above — it is
+# Mixamo-style throughout — so only the joints SOMA does not have need hints.
+# Note the differing leg convention: Core27 uses LeftUpLeg for the hip and
+# LeftLeg for the knee, which is exactly what the entries above already assume.
+_CORE_EXTRA_HINTS = [
+    ("Spine3",          ["spine3", "spine_03", "chest", "upper_chest",
+                         "mixamorig:Spine2"]),
+    ("LeftHandEnd",     ["hand_end.L", "l_hand_end", "mixamorig:LeftHandMiddle4",
+                         "LeftHandMiddle4"]),
+    ("RightHandEnd",    ["hand_end.R", "r_hand_end", "mixamorig:RightHandMiddle4",
+                         "RightHandMiddle4"]),
+    ("LeftHandThumb1",  ["thumb.01.L", "mixamorig:LeftHandThumb1"]),
+    ("RightHandThumb1", ["thumb.01.R", "mixamorig:RightHandThumb1"]),
+]
+
+
 def _normalize(name: str) -> str:
     """Lowercase, strip prefix up to ':', remove non-alphanumeric."""
     name = name.lower()
@@ -96,14 +112,21 @@ def _normalize(name: str) -> str:
 
 def auto_build_mapping(source_arm: bpy.types.Object,
                        target_arm: bpy.types.Object,
-                       model: str = "smpl") -> list[tuple[str, str]]:
+                       model: str = "smpl",
+                       skeleton: str = "") -> list[tuple[str, str]]:
     """
-    Attempt to auto-match bones between source (Kimodo) and target (user) armatures.
-    Returns list of (source_bone_name, target_bone_name) pairs.
+    Attempt to auto-match bones between the generated source armature and the
+    user's target armature. Returns (source_bone_name, target_bone_name) pairs.
+
+    ``skeleton`` is what the bridge reported ("somaskel30"/"cskel27"); hints for
+    joints the source armature does not actually have are skipped anyway, so an
+    unknown value simply falls back to the SOMA table.
     """
     hints = _SOMA_BONE_MAP_HINTS[:]
     if model == "smplx":
         hints += _SMPLX_EXTRA_HINTS
+    if "cskel" in (skeleton or "").lower() or (skeleton or "").lower() == "core":
+        hints += _CORE_EXTRA_HINTS
 
     src_bones = {b.name for b in source_arm.data.bones}
     tgt_bones = {b.name: _normalize(b.name) for b in target_arm.data.bones}

@@ -1,5 +1,102 @@
 # Changelog
 
+## [1.8.1] — 2026-08-21
+
+### Fixed
+
+- **Constraints pointing at the stream armature broke on every restart**: starting a stream deleted and recreated the `ARDY_Stream` object, so a camera parented to it with *Child Of* — or anything else constrained to it — was left with an empty target and no error to explain it. The object is now reused whenever the skeleton is unchanged, and only its animation is replaced; it is rebuilt from scratch only when the bone set genuinely differs.
+- **Objects following the armature lagged a window behind**: streamed frames are written straight into the f-curves, which is the only way to keep up with playback, but that tells Blender nothing has changed — and the panel's redraw only repaints, it does not re-evaluate. Anything depending on the armature therefore kept showing the pose from before the last window. Most visible while backpressure had playback paused, since no frame change was forcing an update either. Each applied window now tags the armature and updates the view layer.
+
+## [1.8.0] — 2026-08-21
+
+### Added
+
+- **Drive the character with the arrow keys** (#52): the Live Stream panel now has a **Control** switch — *Follow Object* as before, or *Arrow Keys*. This mirrors what ARDY's own demo does (`CameraMixin.on_arrow_key_press`): ↑ and ↓ are a throttle, ← and → a steering wheel, over a velocity that **persists** between presses. It is not hold-to-walk — one press and the character keeps going until you slow it down, which is why no key-release tracking is involved. The step sizes for both are adjustable, the panel shows the current speed while driving, and a press re-plans immediately rather than waiting out the re-plan interval.
+- **Steering by velocity, not just position**: following an object projects a path toward a point; driving projects one along a velocity, with no arrival clamp. A zero velocity emits no constraint at all rather than pinning the root in place, so a stopped character can still shift its weight and turn instead of freezing.
+
+### Note
+
+- **Arrow keys are captured while a stream runs**, so they will not step frames during that time — Blender binds them to frame navigation, and stepping the playhead by hand mid-stream fights the re-plan. They behave normally again the moment the stream ends.
+
+## [1.7.6] — 2026-08-21
+
+### Added
+
+- **Sample Steps in the Generate panel**: the denoising step count is now a setting rather than a hidden constant. Every generation path — Single Clip, Timeline, and Variations — was passing the client's built-in default of 100 with no way to change it, on either backend. More steps generally means cleaner motion and a longer wait; fewer is faster and can look noisier. Live Stream keeps its own separate dial, since a streamed window has to finish generating faster than it plays and wants a much lower number.
+- **The panel says when a model ignores the setting**: ARDY can only *subsample* its own diffusion schedule, so it silently clamps anything above the loaded checkpoint's ceiling. That ceiling is reported by the bridge when it starts, and the Generate panel now notes it once the value exceeds it, instead of letting a higher number look like it did something. Kimodo reports no ceiling and takes the value literally.
+
+## [1.7.5] — 2026-08-21
+
+### Fixed
+
+- **The streamed rig animated into a scrambled mess** (1.7.4 regression): 1.7.4 gave the stream armature a proper T-pose rest, which meant ARDY's joint rotations needed rebasing into each bone's rest frame — and the formula was wrong. It used `B = RL⁻¹ · RL_parent · R`, which makes a posed bone's axes equal the joint's global rotation instead of the rest axes *turned by* it, leaving every bone off by its own rest orientation. The correct term drops the parent entirely: `B = RL⁻¹ · R · RL`, a conjugation by the bone's own rest rotation. This failure mode is nasty because the *rest* pose comes out right under either formula — only the animation is wrong — so it cannot be spotted without posing the rig.
+- **The rebasing maths is now covered by tests**: it moved out of the Blender-only module into `ardy_steer.py` as plain quaternion functions, and `tests/test_ardy_steer.py` simulates Blender's own pose composition (`P_i = P_parent · RL_parent⁻¹ · RL_i · B_i`) over a three-bone chain with deliberately awkward rest orientations, requiring that it reproduces ARDY's forward kinematics. The suite also pins that a correct rest pose proves nothing, since that was what let the bad formula ship.
+
+## [1.7.4] — 2026-08-21
+
+### Fixed
+
+- **The streamed armature looked like a hedgehog**: every bone was built pointing along +Y so that rest rotations would be the identity and ARDY's joint rotations could be written onto pose bones with no conversion. The joints landed in the right places, but each bone's *shape* pointed wherever +Y ended up rotated to, so a posed rig fanned out in all directions. Bones now point at their first child the way a BVH import builds them — leaves continue the direction of their chain — and each rotation is rebased through its own and its parent's rest orientation (`basis = RL⁻¹ · RL_parent · R`), with the correction read back from Blender's own `bone.matrix_local` so it stays consistent with whatever Blender actually built. The root's location is likewise converted into bone space rather than being written as a world offset.
+- **Streaming only re-read the target once per generated window**: a step regenerates a whole horizon against the target's position at that instant, and the next step was only triggered once the buffer had drained — so on the default 40-frame model the character committed to a two-second plan and ignored the target until it ran out, which read as jagged, 40-frame-quantised following. A new **Re-plan Every** control decouples *how often the target is re-read* from *how much motion is buffered*; it defaults to 4 frames. Buffer depth still forces a step when generation falls behind, and the in-flight guard means re-planning can never outrun the GPU.
+- **Streaming settings were frozen at stream start**: *Commit Frames* and *Walk Speed* were sent once by `stream_begin`, so moving either slider mid-stream did nothing. They are now re-sent with every step and take effect on the next re-plan, and the panel shows them while a stream is running.
+- **Playback resumed too late after a stall**: the auto-resume threshold was a whole generation horizon of buffered frames, which on the 40-frame model meant long pauses. It now follows the buffer setting instead.
+
+## [1.7.3] — 2026-08-21
+
+### Fixed
+
+- **Any ARDY generation using a Root XZ constraint with a heading crashed**: `shape mismatch: value tensor of shape [N, 2, 2] cannot be broadcast to indexing result of shape [N, 2]`. Headings are one of the few places the two models genuinely disagree: Kimodo takes them as `[cos θ, sin θ]` pairs, which is what the add-on emits, while ARDY's `Root2DConstraintSet` takes **radians** and does the cos/sin conversion itself. Handing it pairs made it stack cos/sin over an already-2D tensor. The ARDY bridge now converts on the way in, so the add-on keeps emitting one format rather than branching on the backend. This hit Live Stream on every step — steering always sets a heading — and equally hit a plain *Generate* whenever a Root XZ waypoint had its heading enabled, including waypoints produced by *Sample Curve as Waypoints*.
+
+## [1.7.2] — 2026-08-21
+
+### Fixed
+
+- **Live Stream would not start on Blender 5.x**: `Could not build the stream armature: 'Action' object has no attribute 'fcurves'`. Blender 4.4 introduced slotted Actions and kept `Action.fcurves` working as a compatibility shim; 5.0 removed it, and the curves now live one level down and per slot — `action.layers[] → .strips[] → .channelbag(slot) → .fcurves`. The stream writes keyframes through F-curves directly (per-key `keyframe_insert` cannot keep up with playback), so it failed before a single frame was generated. The lookup now handles all three layouts, and the action's slot is bound *before* the curves are collected, so on 5.x the right channelbag is indexed rather than whichever one happened to be first.
+- **Scaffolding keyframes no longer empty every curve**: the F-curves are created by inserting one throwaway key per channel, which used to be deleted immediately — leaving every curve keyless, which Blender may garbage-collect, invalidating the references the stream then writes through. The throwaway keys are now placed on the stream's start frame instead, where the first generated window overwrites them as part of its normal truncation.
+
+## [1.7.1] — 2026-08-21
+
+### Fixed
+
+- **Generating on one backend, switching, and generating again produced a broken armature**: the new motion landed on the previous backend's rig with mangled rotations and the character sunk into the floor. *Reuse Armature* keeps pointing at the last generated source armature across a backend switch, and the import path transferred the freshly generated Action onto it without checking the two were the same skeleton. They never are: Kimodo emits somaskel77 (77 bones) and ARDY emits cskel27 (27). Worse, the names that overlap mean different joints — SOMA's `LeftLeg` is the hip, Core27's is the knee — so a partial, wrong-looking pose was applied rather than nothing at all, and because the root location channel is relative to whichever rest pose the BVH import built, the character was also offset by the difference in rest hip height. Reuse now happens only between armatures with identical bone sets; a mismatch keeps the newly imported armature instead and says so in the system console. Switching backend also clears the *Reuse Armature* field, so it never shows a rig that is silently never going to be reused. Deleting the old armature by hand between backends was the workaround; it is no longer needed.
+
+## [1.7.0] — 2026-08-21
+
+### Added
+
+- **Live Stream: ARDY generates while the timeline plays** (#52): a new **Live Stream** panel (ARDY only) starts an open-ended generation instead of a fixed-length clip. Pick an object to follow, press *Start Live Stream*, and the character walks toward wherever that object currently is — move it during playback and the motion re-plans to follow. This is not a bake: ARDY is autoregressive, so the bridge holds the motion state and each step regenerates the near future against the target's live position. Frames land as ordinary keyframes on an ordinary armature, so when you stop the stream the result is a normal Action and the **Retarget** panel works on it unchanged. Kimodo has no autoregressive entry point, so the panel is hidden on that backend.
+- **Streaming controls**: *Steps* is the latency dial — a live window has to finish generating faster than it plays, so it defaults far lower (8) than one-shot generation; raise it if motion looks noisy and the GPU has headroom. *Walk Speed* sets how fast the waypoint path chases the target (the prompt still decides the gait). *Commit Frames* is how far ahead of the playhead is locked in: lower reacts sooner, too low and motion about to play gets rewritten under you. *Buffer Frames* is how far ahead to keep generating. The panel reports the buffer depth and measured seconds-per-step, and flags when the GPU is the limit.
+- **Graceful backpressure**: when generation falls behind the playhead, playback pauses with "Waiting for ARDY…" and resumes once the buffer refills, rather than playing into frames that have no keyframes yet and freezing the character mid-stride.
+- **Streaming bridge protocol**: `stream_begin` / `stream_step` / `stream_end` alongside the existing commands. Each step is still one request and one reply — no server push — so the client's threading, cancellation and single-in-flight rules are unchanged, and the Kimodo path is untouched. The prompt encoding is cached between steps (it is an 8B model), so editing the prompt mid-stream re-encodes and leaving it alone does not.
+- **Tests for all of it**: the steering geometry (`tests/test_ardy_steer.py`) and the streaming protocol driven over the real JSON pipe against a mock model, covering the replan arithmetic, history alignment, prompt-cache behaviour and that state is really dropped on `stream_end`. The suite now also pins the transient-state reset, so a saved `.blend` can no longer come back stuck mid-stream — the same trap that produced #43.
+
+### Fixed
+
+- **`cfg_text_weight: null` could crash a request**: the client always sends the ARDY guidance keys so the Kimodo bridge can ignore them, but the ARDY bridge read them with `float(req.get(..., 2.0))`, which raises on an explicit `null` rather than falling back to the default. Only reachable from the new streaming path today, but it was wrong for `generate` too.
+
+## [1.6.1] — 2026-08-20
+
+### Fixed
+
+- **ARDY could not start: the text encoder was installed without its base weights**: the installer downloaded the two `McGill-NLP/LLM2Vec-Meta-Llama-3-8B-Instruct-mntp*` repos and stopped there, but those repos hold only a LoRA adapter (`adapter_model.safetensors`, ~168 MB) plus a config and tokenizer — the ~16 GB of Llama-3 base weights they adapt live in the separate, gated `meta-llama/Meta-Llama-3-8B-Instruct`. The encoder directory therefore looked complete, the install reported success and wrote its sentinel, and *Start ARDY* then died with `OSError: Error no file named model.safetensors, or pytorch_model.bin` from inside transformers — pointing at a folder that plainly did contain a `.safetensors` file, which made the real cause hard to see. The base weights are now downloaded into the adapter's own directory, which is the layout LLM2Vec loads from (it reads the checkpoint from that folder, then applies the adapter from the same folder). Only the shards and their index are taken, so the adapter repo's `config.json` — which carries the `_name_or_path` LLM2Vec reads back to select the Llama-3 prompt template — and its tokenizer are left intact, and the second full copy of the weights that Meta ships under `original/` is not pulled.
+- **A failed encoder download no longer passes as a finished install**: the install now verifies that real base weights are present before writing the completion sentinel, and refuses to finish if all it finds is the adapter. The error names the directory, lists what was actually in it, and names the repo whose download is missing, instead of surfacing twenty minutes later as a stack trace at startup. Because the encoder is gated, a HuggingFace refusal on *any* of the three repos now also reports which repo was refused, alongside the licence and token links.
+
+## [1.6.0] — 2026-08-20
+
+### Added
+
+- **NVIDIA ARDY as a second backend** (#52): the Connection panel now starts with a Kimodo / ARDY switch, and everything downstream — generation, motion constraints, the timeline, retargeting, the frame-rate warning — follows whichever is selected. Kimodo remains the default and is unchanged; nothing about an existing scene behaves differently until the switch is moved. ARDY is autoregressive rather than one-shot, so it responds faster and handles long sequences better, and its Core skeleton uses Mixamo-style bone names (with toes) that auto-map onto typical rigs more cleanly than SOMA's. What it costs today: 20 FPS instead of 30, no standard-T-pose export (the Core skeleton ships no T-pose reference), and a gated text encoder. NVIDIA has announced an ARDY SOMA checkpoint but not released it — only Core and G1 exist, so Core is what the addon offers. The full analysis, including what changes when SOMA lands, is in `docs/ardy-feasibility.md`.
+- **One-click ARDY installer**: *Install ARDY (Auto)* creates its own venv (default `~/.ardy-venv`, never shared with Kimodo — ARDY pins `transformers` exactly), installs PyTorch matched to your GPU using the same detection as the Kimodo installer, installs ARDY, downloads the text encoder and the Core checkpoint, and sets the Python path. Two things that would otherwise be dead ends are handled directly: ARDY's text encoder is built on the gated Meta-Llama-3-8B-Instruct, so the panel links the licence page and the token page, and access is verified *before* anything is downloaded — a missing licence fails in seconds instead of after twenty minutes. And ARDY's `setup.py` always compiles a CMake extension with no way to skip it, which would fail outright on a machine with no compiler; the installer detects the toolchain and, when it is absent, installs without the extension and says so in the panel. Everything works in that state except foot-skate cleanup. All deletion, subprocess-environment, download-retry and progress machinery is shared with the Kimodo installer, including the 1.5.7 `_safe_rmtree` guards.
+- **BVH writer for ARDY** (`ardy_bvh.py`): ARDY has no BVH exporter — it writes `.npz`, and `ardy/skeleton/bvh.py` only *reads* BVH — so the bridge writes its own from the skeleton's rest joints, hierarchy and per-frame local rotations. Output goes through the addon's existing BVH import, reuse-armature, history and retarget paths unchanged.
+- **Blender-free test suite** (`tests/`): `python3 tests/run_tests.py`. Covers the BVH writer against forward kinematics, the ARDY bridge driven over its real JSON protocol as a subprocess, add-on registration and property wiring, and every panel drawn in both backends. `bpy` and the ARDY model are mocked, so no Blender and no GPU are needed; modules whose optional dependency is missing are skipped rather than failed.
+
+### Changed
+
+- **The bridge protocol is now backend-neutral**: `subprocess_client.py` launches `bridge_server.py` or `ardy_bridge.py` depending on the backend and reads the model's real frame rate and skeleton out of its `ready` message instead of assuming Kimodo's 30 FPS and SOMA. The wire format, every status value, the threading model and cancellation are untouched, so the Kimodo path is byte-for-byte what it was.
+- **The frame-rate warning follows the model**: it read "Kimodo needs 30 FPS" and set 30 unconditionally; it now names the active model's own rate (Kimodo 30, ARDY Core 20) and sets that.
+- **Constraint JSON is no longer SOMA-only**: `constraints.py` gained a skeleton registry, and `build_constraints_json` takes the joint order, parents and end-effector indices from whichever model is loaded. The JSON layout itself did not change — ARDY registers the same constraint types and accepts the same keys — so the Motion Constraints panel, curve waypoints and full-body pose authoring all work against either backend with no user-visible difference.
+- **Bone auto-matching knows the Core skeleton**: the SOMA hint table already covered most of Core27, so only the joints SOMA lacks (Spine3, hand ends, thumbs) were added.
+
 ## [1.5.8] — 2026-08-20
 
 ### Changed

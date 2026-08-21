@@ -114,6 +114,86 @@ SOMA_JOINT_PARENTS = [
     28,  # 29 RightToeBase
 ]
 
+# ---------------------------------------------------------------------------
+# ARDY CoreSkeleton27 (cskel27)
+# ---------------------------------------------------------------------------
+# Every released ARDY checkpoint uses this skeleton — the SOMA variant is
+# announced but not published, so ardy/model/registry.py ships "core" and "g1"
+# only. Order and parents mirror CoreSkeleton27.bone_order_names_with_parents.
+# The names are Mixamo-style, which makes them easier to auto-map onto user
+# rigs than SOMA's, and unlike SOMA30 there are no jaw/eye joints.
+
+CORE_JOINT_ORDER = [
+    "Hips",              # 0  — root
+    "Spine",             # 1
+    "Spine1",            # 2
+    "Spine2",            # 3
+    "Spine3",            # 4
+    "Neck",              # 5
+    "Head",              # 6
+    "RightShoulder",     # 7
+    "RightArm",          # 8
+    "RightForeArm",      # 9
+    "RightHand",         # 10
+    "RightHandEnd",      # 11
+    "RightHandThumb1",   # 12
+    "LeftShoulder",      # 13
+    "LeftArm",           # 14
+    "LeftForeArm",       # 15
+    "LeftHand",          # 16
+    "LeftHandEnd",       # 17
+    "LeftHandThumb1",    # 18
+    "RightUpLeg",        # 19 — hip
+    "RightLeg",          # 20 — knee
+    "RightFoot",         # 21
+    "RightToeBase",      # 22
+    "LeftUpLeg",         # 23 — hip
+    "LeftLeg",           # 24 — knee
+    "LeftFoot",          # 25
+    "LeftToeBase",       # 26
+]
+
+CORE_JOINT_PARENTS = [
+    -1,  # 0  Hips            (root)
+     0,  # 1  Spine
+     1,  # 2  Spine1
+     2,  # 3  Spine2
+     3,  # 4  Spine3
+     4,  # 5  Neck
+     5,  # 6  Head
+     4,  # 7  RightShoulder
+     7,  # 8  RightArm
+     8,  # 9  RightForeArm
+     9,  # 10 RightHand
+    10,  # 11 RightHandEnd
+    10,  # 12 RightHandThumb1
+     4,  # 13 LeftShoulder
+    13,  # 14 LeftArm
+    14,  # 15 LeftForeArm
+    15,  # 16 LeftHand
+    16,  # 17 LeftHandEnd
+    16,  # 18 LeftHandThumb1
+     0,  # 19 RightUpLeg
+    19,  # 20 RightLeg
+    20,  # 21 RightFoot
+    21,  # 22 RightToeBase
+     0,  # 23 LeftUpLeg
+    23,  # 24 LeftLeg
+    24,  # 25 LeftFoot
+    25,  # 26 LeftToeBase
+]
+
+CORE_EFFECTOR_BONE = {
+    'left_hand':  'LeftHand',
+    'right_hand': 'RightHand',
+    'left_foot':  'LeftFoot',
+    'right_foot': 'RightFoot',
+}
+CORE_EFFECTOR_IDX = {
+    'left_hand': 16, 'right_hand': 10, 'left_foot': 25, 'right_foot': 21,
+}
+
+
 # Coordinate-change matrix: v_kimodo = _M_BK @ v_blender
 # Derived from blender_to_kimodo_pos: (Bx, By, Bz) → (Bx, Bz, -By)
 # M_BK = [[1,0,0],[0,0,1],[0,-1,0]] — orthogonal, det=1
@@ -140,6 +220,55 @@ DEFAULT_TPOSE_OFFSETS = {
     'left_foot':  ( 0.10, -0.90, 0.0),
     'right_foot': (-0.10, -0.90, 0.0),
 }
+
+
+# ---------------------------------------------------------------------------
+# Skeleton registry
+# ---------------------------------------------------------------------------
+# Constraint JSON is skeleton-shaped: `local_joints_rot` is indexed by the
+# model's own joint order, so the tables above must match whichever backend is
+# loaded. Everything else in this module — the coordinate conversion, the pose
+# extraction, the JSON layout — is skeleton-agnostic and shared.
+
+SKELETONS = {
+    'soma': {
+        "name":          "soma",
+        "joint_order":   SOMA_JOINT_ORDER,
+        "joint_parents": SOMA_JOINT_PARENTS,
+        "effector_bone": EFFECTOR_BONE,
+        "effector_idx":  EFFECTOR_IDX,
+    },
+    'core': {
+        "name":          "core",
+        "joint_order":   CORE_JOINT_ORDER,
+        "joint_parents": CORE_JOINT_PARENTS,
+        "effector_bone": CORE_EFFECTOR_BONE,
+        "effector_idx":  CORE_EFFECTOR_IDX,
+    },
+}
+
+# Names a bridge may report in its "ready" message, mapped onto the tables.
+_SKELETON_ALIASES = {
+    "somaskel30": 'soma', "somaskel77": 'soma', "soma": 'soma', "smpl": 'soma',
+    "cskel27": 'core', "cskel29": 'core', "core": 'core',
+}
+
+
+def get_skeleton(name: "str | None") -> dict:
+    """Return the joint tables for a skeleton name, defaulting to SOMA.
+
+    Accepts what a bridge reports ("cskel27", "somaskel30") as well as the
+    short keys used in the scene properties. An unknown name falls back to
+    SOMA so an older .blend or a future model never hard-fails here.
+    """
+    key = _SKELETON_ALIASES.get((name or "").strip().lower(), 'soma')
+    return SKELETONS[key]
+
+
+def scene_skeleton(scene) -> dict:
+    """Joint tables for whichever backend the scene is currently using."""
+    return get_skeleton(getattr(getattr(scene, "kimodo", None),
+                                "active_skeleton", "soma"))
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +305,13 @@ def euler_to_axis_angle_vec(e: mathutils.Euler) -> list[float]:
 
 
 def heading_from_angle(angle_rad: float) -> list[float]:
-    """Kimodo expects heading as [cos(θ), sin(θ)]."""
+    """Kimodo expects heading as [cos(θ), sin(θ)].
+
+    ARDY does not: its Root2DConstraintSet takes radians and does the cos/sin
+    itself.  Do not "fix" this to emit radians — the ARDY bridge converts on
+    the way in (ardy_bridge.py::_headings_to_radians), which keeps this module
+    speaking one format instead of branching on the backend.
+    """
     return [math.cos(angle_rad), math.sin(angle_rad)]
 
 
@@ -212,8 +347,12 @@ def _rot3_to_axis_angle(m: mathutils.Matrix) -> list[float]:
 def get_armature_joint_rots(
     armature_obj: bpy.types.Object,
     joint_order: list[str],
+    joint_parents: "list[int] | None" = None,
 ) -> list[list[float]]:
-    """Extract SOMASkeleton30 local joint rotations from a posed armature.
+    """Extract per-joint local rotations from a posed armature.
+
+    Works for any skeleton: pass the model's ``joint_order`` and the matching
+    ``joint_parents`` (defaults to SOMA's for backwards compatibility).
 
     SMPL/Kimodo defines per-joint local rotations via:
         G[i] = G[parent[i]] @ R[i]
@@ -239,6 +378,8 @@ def get_armature_joint_rots(
          to get G[i] in Kimodo world coordinates.
       3. Recover the local rotation as R[i] = G[parent]⁻¹ @ G[i].
     """
+    if joint_parents is None:
+        joint_parents = SOMA_JOINT_PARENTS
     pose_bones = armature_obj.pose.bones
 
     # Blender Z-up → Kimodo Y-up basis change (see module header).
@@ -262,7 +403,7 @@ def get_armature_joint_rots(
     result: list[list[float]] = []
     for i, name in enumerate(joint_order):
         G_i = G_kimodo.get(name, mathutils.Matrix.Identity(3))
-        parent_idx = SOMA_JOINT_PARENTS[i] if i < len(SOMA_JOINT_PARENTS) else -1
+        parent_idx = joint_parents[i] if i < len(joint_parents) else -1
         if parent_idx < 0:
             R_local = G_i
         else:
@@ -306,6 +447,7 @@ def get_bone_world_position(
 def get_effector_tpose_offset(
     scene: bpy.types.Scene,
     effector_type: str,
+    skel: "dict | None" = None,
 ) -> tuple[float, float, float]:
     """Rest-pose offset from Hips to the named end-effector, in Kimodo Y-up meters.
 
@@ -318,7 +460,7 @@ def get_effector_tpose_offset(
         bones = arm.data.bones
         hips = (bones.get("Hips") or bones.get("hips")
                 or bones.get("Hip") or bones.get("pelvis") or bones.get("Pelvis"))
-        eff = bones.get(EFFECTOR_BONE[effector_type])
+        eff = bones.get((skel or SKELETONS['soma'])["effector_bone"][effector_type])
         if hips and eff:
             d = eff.head_local - hips.head_local   # Blender Z-up local space
             return (d.x, d.z, -d.y)                # → Kimodo Y-up
@@ -348,21 +490,37 @@ def build_constraints_json(
     kimodo_fps: float = 30.0,
     auto_canonicalize: bool = True,
     scene_start_override: "int | None" = None,
+    skeleton: "str | dict | None" = None,
 ) -> list[dict]:
     """
-    Convert Blender constraint items to Kimodo constraints JSON list.
+    Convert Blender constraint items to the model's constraints JSON list.
+
+    The output format is shared by Kimodo and ARDY — both register the same
+    constraint types and both accept 'smooth_root_2d' as an alias for
+    'root_2d' — so only the joint indexing depends on the backend.
 
     Parameters
     ----------
     constraint_items : iterable of KIMODO_ConstraintItem PropertyGroup entries
     scene            : bpy.context.scene
-    kimodo_fps       : Kimodo's motion FPS (default 30)
+    kimodo_fps       : the model's motion FPS (Kimodo 30, ARDY Core 20)
     auto_canonicalize: subtract XZ of earliest root waypoint so it lands at (0,0)
+    skeleton         : skeleton name or table dict; defaults to the scene's
+                       active backend skeleton
 
     Returns
     -------
     list of dicts ready to be json.dumps()-ed and sent to Kimodo
     """
+    if isinstance(skeleton, dict):
+        skel = skeleton
+    elif skeleton:
+        skel = get_skeleton(skeleton)
+    else:
+        skel = scene_skeleton(scene)
+    joint_order   = skel["joint_order"]
+    joint_parents = skel["joint_parents"]
+
     blender_fps = scene.render.fps / scene.render.fps_base
     scene_start = scene.frame_start if scene_start_override is None else scene_start_override
 
@@ -446,7 +604,7 @@ def build_constraints_json(
                         _evaluate_frame(scene, ci.frame)
                         pos3d = get_root_position(obj)
                         root_positions.append(apply_offset_3d(pos3d))
-                        jrot = get_armature_joint_rots(obj, SOMA_JOINT_ORDER)
+                        jrot = get_armature_joint_rots(obj, joint_order, joint_parents)
                         local_joints_rot.append(jrot)
                         pos2d = [pos3d[0], pos3d[2]]
                         smooth_root_2d.append(apply_offset_2d(pos2d))
@@ -456,12 +614,12 @@ def build_constraints_json(
                         root_positions.append(apply_offset_3d(pos3d))
                         pos2d = [pos3d[0], pos3d[2]]
                         smooth_root_2d.append(apply_offset_2d(pos2d))
-                        local_joints_rot.append([[0.0, 0.0, 0.0]] * len(SOMA_JOINT_ORDER))
+                        local_joints_rot.append([[0.0, 0.0, 0.0]] * len(joint_order))
 
                 elif ctype in ('left_hand', 'right_hand', 'left_foot', 'right_foot'):
                     # Kimodo derives the effector target from FK on (root_positions,
                     # local_joints_rot) — root_positions is the HIPS, NOT the hand.
-                    eff_idx = EFFECTOR_IDX[ctype]
+                    eff_idx = skel["effector_idx"][ctype]
 
                     if obj.type == 'ARMATURE':
                         # Armature marker: read hips + full pose like fullbody.
@@ -469,7 +627,7 @@ def build_constraints_json(
                         # the user posed it.
                         _evaluate_frame(scene, ci.frame)
                         hips_pos = get_root_position(obj)
-                        jrot = get_armature_joint_rots(obj, SOMA_JOINT_ORDER)
+                        jrot = get_armature_joint_rots(obj, joint_order, joint_parents)
                     else:
                         # Empty marker: its location is the *target* end-effector
                         # position. Pick hips such that a T-pose places the
@@ -477,9 +635,9 @@ def build_constraints_json(
                         # rotations) for the body. The Empty's rotation is used
                         # as the effector's orientation.
                         target = blender_to_kimodo_pos(obj.location)
-                        ox, oy, oz = get_effector_tpose_offset(scene, ctype)
+                        ox, oy, oz = get_effector_tpose_offset(scene, ctype, skel)
                         hips_pos = [target[0] - ox, target[1] - oy, target[2] - oz]
-                        jrot = [[0.0, 0.0, 0.0] for _ in SOMA_JOINT_ORDER]
+                        jrot = [[0.0, 0.0, 0.0] for _ in joint_order]
                         # In T-pose all ancestors are identity, so the effector's
                         # local rotation equals its world rotation.
                         jrot[eff_idx] = quat_to_axis_angle_vec(

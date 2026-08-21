@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "kimodo_blender_bridge"
-version = "1.5.8"
+version = "1.8.1"
 name = "Kimodo Blender Bridge"
-tagline = "Generate human motion with NVIDIA Kimodo AI"
+tagline = "Generate human motion with NVIDIA Kimodo or ARDY"
 maintainer = "Lewdineer"
 type = "add-on"
 

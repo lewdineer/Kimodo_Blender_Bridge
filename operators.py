@@ -18,6 +18,7 @@ from . import subprocess_client as sc
 from . import retarget as rt
 from . import constraints as cmod
 from . import setup_operator as so
+from . import ardy_setup as ardy_so
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +153,36 @@ def _push_history(s, prompt: str, seed: int, duration: float, bvh_path: str,
 # Bridge start/stop state  (thread → modal operator communication)
 # ---------------------------------------------------------------------------
 
+def _model_fps(s) -> float:
+    """Frame rate the active backend generates at.
+
+    Kimodo is always 30 and has a user-facing override; ARDY reports its own
+    (20 for Core, 25 for G1) in the bridge's ready message.
+    """
+    if s.backend == 'ARDY':
+        return float(s.native_fps or 20.0)
+    return float(s.kimodo_fps)
+
+
+def _ardy_kwargs(s) -> dict:
+    """Generation arguments beyond the shared prompt/duration/seed set.
+
+    Always safe to pass: both bridges read requests with req.get(), so the
+    Kimodo bridge ignores the keys meant only for ARDY.
+
+    diffusion_steps is the exception — both backends honour it. Kimodo takes it
+    literally; ARDY can only subsample its own schedule, so it clamps to the
+    checkpoint's ceiling (reported as max_diffusion_steps when the bridge
+    starts) rather than failing.
+    """
+    return {
+        "diffusion_steps": s.diffusion_steps,
+        "cfg_text_weight": s.ardy_cfg_text_weight,
+        "cfg_constraint_weight": s.ardy_cfg_constraint_weight,
+        "history_frames": s.ardy_history_frames,
+    }
+
+
 _start_state = {
     "running": False,
     "done":    False,
@@ -176,11 +207,14 @@ class KIMODO_OT_StartKimodo(Operator):
     _timer  = None
     _thread = None
 
-    def _run_start(self, python_exe: str, model_name: str, use_offload: bool):
+    def _run_start(self, python_exe: str, model_name: str, use_offload: bool,
+                   backend: str = "kimodo", extra_args=None):
         def progress(msg):
             _start_state["message"] = msg
 
-        success, msg = sc.start(python_exe, model_name, use_offload=use_offload, progress_callback=progress)
+        success, msg = sc.start(python_exe, model_name, use_offload=use_offload,
+                                progress_callback=progress, backend=backend,
+                                extra_args=extra_args)
         _start_state["success"] = success
         _start_state["message"] = msg
         _start_state["done"]    = True
@@ -188,9 +222,10 @@ class KIMODO_OT_StartKimodo(Operator):
 
     def invoke(self, context, event):
         s = context.scene.kimodo
+        label = "ARDY" if s.backend == 'ARDY' else "Kimodo"
 
         if sc.is_running():
-            self.report({'INFO'}, "Kimodo is already running.")
+            self.report({'INFO'}, f"{sc.get_backend().upper()} is already running.")
             return {'CANCELLED'}
 
         _reset_start_state()
@@ -201,16 +236,39 @@ class KIMODO_OT_StartKimodo(Operator):
         # Resolve the Python hint on the main thread. When the scene has no
         # explicit path, fall back to the remembered managed-venv location
         # (addon preference) so a fresh scene still finds the install.
-        python_hint = (s.python_executable or "").strip()
-        if not python_hint:
+        extra_args = None
+        if s.backend == 'ARDY':
+            backend = "ardy"
+            model_name = s.ardy_model
+            python_hint = (s.ardy_python_executable or "").strip()
+            if not python_hint:
+                try:
+                    python_hint = ardy_so.managed_python()
+                except Exception:
+                    python_hint = ""
+            extra_args = []
+            if s.ardy_text_encoder_device == 'CPU':
+                extra_args += ["--text-encoder-device", "cpu"]
+            # An install without the native extension cannot run foot-skate
+            # correction; asking for it would only raise mid-generation.
             try:
-                python_hint = so.managed_python()
+                if not ardy_so.has_postprocess(python_hint):
+                    extra_args.append("--no-postprocess")
             except Exception:
-                python_hint = ""
+                pass
+        else:
+            backend = "kimodo"
+            model_name = s.kimodo_model
+            python_hint = (s.python_executable or "").strip()
+            if not python_hint:
+                try:
+                    python_hint = so.managed_python()
+                except Exception:
+                    python_hint = ""
 
         self._thread = threading.Thread(
             target=self._run_start,
-            args=(python_hint, s.kimodo_model, s.use_offload),
+            args=(python_hint, model_name, s.use_offload, backend, extra_args),
             daemon=True,
         )
         self._thread.start()
@@ -240,14 +298,28 @@ class KIMODO_OT_StartKimodo(Operator):
 
         context.window_manager.event_timer_remove(self._timer)
 
+        label = "ARDY" if s.backend == 'ARDY' else "Kimodo"
         if _start_state["success"]:
             s.is_connected      = True
             s.connection_status = _start_state["message"]
-            self.report({'INFO'}, f"Kimodo ready: {_start_state['message']}")
+            # Trust the bridge over our defaults: it knows the real frame rate
+            # and skeleton, which differ per backend and per checkpoint.
+            info = sc.get_ready_info()
+            try:
+                if info.get("fps"):
+                    s.native_fps = float(info["fps"])
+                if info.get("skeleton"):
+                    s.active_skeleton = str(info["skeleton"])
+                # ARDY reports the highest step count its schedule allows; the
+                # Kimodo bridge does not, so leave it at 0 = "no known ceiling".
+                s.native_max_steps = int(info.get("max_diffusion_steps") or 0)
+            except Exception:
+                pass
+            self.report({'INFO'}, f"{label} ready: {_start_state['message']}")
         else:
             s.is_connected      = False
             s.connection_status = _start_state["message"]
-            self.report({'ERROR'}, f"Kimodo failed to start: {_start_state['message']}")
+            self.report({'ERROR'}, f"{label} failed to start: {_start_state['message']}")
 
         return {'FINISHED'}
 
@@ -261,11 +333,12 @@ class KIMODO_OT_StopKimodo(Operator):
     bl_label  = "Stop Kimodo"
 
     def execute(self, context):
+        label = "ARDY" if sc.get_backend() == "ardy" else "Kimodo"
         sc.stop()
         s = context.scene.kimodo
         s.is_connected      = False
         s.connection_status = "Stopped"
-        self.report({'INFO'}, "Kimodo bridge stopped.")
+        self.report({'INFO'}, f"{label} bridge stopped.")
         return {'FINISHED'}
 
 
@@ -281,7 +354,8 @@ class KIMODO_OT_Generate(Operator):
     _timer = None
     _thread = None
 
-    def _run_generation(self, prompt, duration, seed, fmt, constraints_json=None, bvh_standard_tpose=False):
+    def _run_generation(self, prompt, duration, seed, fmt, constraints_json=None,
+                        bvh_standard_tpose=False, backend_kwargs=None):
         """Runs in background thread."""
         def progress_cb(msg):
             _generation_state["progress"] = msg
@@ -294,6 +368,7 @@ class KIMODO_OT_Generate(Operator):
             constraints_json=constraints_json,
             bvh_standard_tpose=bvh_standard_tpose,
             progress_callback=progress_cb,
+            **(backend_kwargs or {}),
         )
         _generation_state["success"] = success
         _generation_state["result"] = result
@@ -304,7 +379,9 @@ class KIMODO_OT_Generate(Operator):
         s = context.scene.kimodo
 
         if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+            label = "ARDY" if s.backend == 'ARDY' else "Kimodo"
+            self.report({'WARNING'},
+                        f"{label} is not running — click 'Start {label}' first.")
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating — please wait.")
@@ -329,7 +406,7 @@ class KIMODO_OT_Generate(Operator):
                 constraints_data = cmod.build_constraints_json(
                     s.motion_constraints,
                     context.scene,
-                    kimodo_fps=s.kimodo_fps,
+                    kimodo_fps=_model_fps(s),
                     auto_canonicalize=s.auto_canonicalize,
                 )
                 constraints_json = json.dumps(constraints_data)
@@ -346,6 +423,7 @@ class KIMODO_OT_Generate(Operator):
                 s.output_format,
                 constraints_json,
                 s.bvh_standard_tpose,
+                _ardy_kwargs(s),
             ),
             daemon=True,
         )
@@ -485,14 +563,38 @@ def _bind_action_with_slot(obj: bpy.types.Object, action: bpy.types.Action) -> N
         ad.action_slot = slots[0]
 
 
+def _skeleton_signature(arm_obj) -> frozenset:
+    """The set of bone names identifying which model produced an armature."""
+    data = getattr(arm_obj, "data", None)
+    if data is None:
+        return frozenset()
+    return frozenset(b.name for b in data.bones)
+
+
 def _apply_to_existing_source(s, new_arm: bpy.types.Object) -> bpy.types.Object:
     """
     If reuse_armature is set, transfer the action from new_arm to it and
     delete new_arm.  Returns the armature that should be used going forward.
+
+    Reuse only happens between armatures of the *same* skeleton.  Kimodo emits
+    somaskel77 and ARDY emits cskel27: different bone counts, and the names
+    that do overlap mean different joints (SOMA's LeftLeg is the hip, Core27's
+    is the knee).  The root location channel is also relative to whatever rest
+    pose the BVH import built, so moving an action across skeletons lands
+    curves on the wrong joints *and* offsets the character by the difference in
+    rest hip height — it sinks through the floor.  Generating on one backend,
+    switching, and generating again used to do exactly that, because the
+    armature pointer survives the switch.
     """
     existing = s.reuse_armature
     if not existing or existing.type != 'ARMATURE' or existing == new_arm:
         return new_arm  # nothing to reuse — keep the freshly imported one
+
+    if _skeleton_signature(existing) != _skeleton_signature(new_arm):
+        print(f"[Kimodo] '{existing.name}' is a different skeleton "
+              f"({len(existing.data.bones)} bones vs {len(new_arm.data.bones)}) — "
+              f"keeping the new armature instead of reusing it.", flush=True)
+        return new_arm
 
     new_action = new_arm.animation_data.action if new_arm.animation_data else None
     old_action = existing.animation_data.action if existing.animation_data else None
@@ -602,7 +704,8 @@ class KIMODO_OT_AutoMapBones(Operator):
             self.report({'ERROR'}, "Set the Target Armature first.")
             return {'CANCELLED'}
 
-        pairs = rt.auto_build_mapping(s.source_armature, s.target_armature, s.model_type)
+        pairs = rt.auto_build_mapping(s.source_armature, s.target_armature,
+                                      s.model_type, s.active_skeleton)
         s.bone_mappings.clear()
 
         for src, tgt in pairs:
@@ -1043,7 +1146,9 @@ class KIMODO_OT_GenerateSegment(Operator):
             self.report({'ERROR'}, "No segment selected.")
             return {'CANCELLED'}
         if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+            label = "ARDY" if s.backend == 'ARDY' else "Kimodo"
+            self.report({'WARNING'},
+                        f"{label} is not running — click 'Start {label}' first.")
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating — please wait.")
@@ -1077,7 +1182,8 @@ class KIMODO_OT_GenerateSegment(Operator):
 
         self._thread = threading.Thread(
             target=self._run_generation,
-            args=(seg.prompt, duration, seed, s.output_format, constraints_json, s.bvh_standard_tpose),
+            args=(seg.prompt, duration, seed, s.output_format, constraints_json,
+                  s.bvh_standard_tpose, _ardy_kwargs(s)),
             daemon=True,
         )
         self._thread.start()
@@ -1087,7 +1193,8 @@ class KIMODO_OT_GenerateSegment(Operator):
         wm.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
-    def _run_generation(self, prompt, duration, seed, fmt, constraints_json, bvh_standard_tpose):
+    def _run_generation(self, prompt, duration, seed, fmt, constraints_json,
+                        bvh_standard_tpose, backend_kwargs=None):
         def progress_cb(msg):
             _generation_state["progress"] = msg
 
@@ -1099,6 +1206,7 @@ class KIMODO_OT_GenerateSegment(Operator):
             constraints_json=constraints_json,
             bvh_standard_tpose=bvh_standard_tpose,
             progress_callback=progress_cb,
+            **(backend_kwargs or {}),
         )
         _generation_state["success"] = success
         _generation_state["result"]  = result
@@ -1193,7 +1301,7 @@ def _build_multi_prompt_constraints(context, first_start_frame: int) -> "tuple[s
     try:
         data = cmod.build_constraints_json(
             s.motion_constraints, context.scene,
-            kimodo_fps=s.kimodo_fps,
+            kimodo_fps=_model_fps(s),
             auto_canonicalize=s.auto_canonicalize,
             scene_start_override=first_start_frame,
         )
@@ -1217,7 +1325,9 @@ class KIMODO_OT_GenerateAllSegments(Operator):
     def invoke(self, context, event):
         s = context.scene.kimodo
         if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+            label = "ARDY" if s.backend == 'ARDY' else "Kimodo"
+            self.report({'WARNING'},
+                        f"{label} is not running — click 'Start {label}' first.")
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating.")
@@ -1272,7 +1382,8 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         self._thread = threading.Thread(
             target=self._run_all,
             args=(prompts, durations, seed, s.output_format,
-                  constraints_json, s.bvh_standard_tpose, num_transition_frames, seeds),
+                  constraints_json, s.bvh_standard_tpose, num_transition_frames,
+                  seeds, _ardy_kwargs(s)),
             daemon=True,
         )
         self._thread.start()
@@ -1283,7 +1394,7 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         return {'RUNNING_MODAL'}
 
     def _run_all(self, prompts, durations, seed, fmt, constraints_json, bvh_standard_tpose,
-                 num_transition_frames=5, seeds=None):
+                 num_transition_frames=5, seeds=None, backend_kwargs=None):
         def progress_cb(msg):
             _generation_state["progress"] = msg
 
@@ -1297,6 +1408,7 @@ class KIMODO_OT_GenerateAllSegments(Operator):
             num_transition_frames=num_transition_frames,
             progress_callback=progress_cb,
             seeds=seeds,
+            **(backend_kwargs or {}),
         )
         _generation_state["success"] = success
         _generation_state["result"]  = result
@@ -1444,7 +1556,7 @@ def _build_segment_constraints(context, seg) -> "tuple[str | None, str | None]":
     try:
         data = cmod.build_constraints_json(
             s.motion_constraints, context.scene,
-            kimodo_fps=s.kimodo_fps,
+            kimodo_fps=_model_fps(s),
             auto_canonicalize=s.auto_canonicalize,
         )
         return json.dumps(data), None
@@ -1942,7 +2054,7 @@ class KIMODO_OT_PreviewConstraintsJSON(Operator):
             json_str = cmod.constraints_to_json_string(
                 s.motion_constraints,
                 context.scene,
-                kimodo_fps=s.kimodo_fps,
+                kimodo_fps=_model_fps(s),
                 auto_canonicalize=s.auto_canonicalize,
             )
         except Exception as e:
@@ -1978,15 +2090,22 @@ class KIMODO_OT_ClearConstraints(Operator):
 
 
 class KIMODO_OT_SetTo30FPS(Operator):
-    """Set the scene frame rate to 30 FPS for Kimodo compatibility"""
+    """Set the scene frame rate to match the active model
+
+    Kimodo always generates at 30 FPS; ARDY Core is 20 and G1 is 25. Keeping
+    the operator id lets existing keymaps and older .blend files still find it.
+    """
     bl_idname = "kimodo.set_to_30fps"
-    bl_label = "Set Scene to 30 FPS"
+    bl_label = "Match Scene to Model FPS"
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        context.scene.render.fps = 30
+        fps = _model_fps(context.scene.kimodo)
+        # Blender stores the rate as fps / fps_base; the models are all whole
+        # numbers, so a base of 1.0 is exact.
+        context.scene.render.fps = int(round(fps))
         context.scene.render.fps_base = 1.0
-        self.report({'INFO'}, "Scene FPS set to 30.")
+        self.report({'INFO'}, f"Scene FPS set to {int(round(fps))}.")
         return {'FINISHED'}
 
 
@@ -2075,7 +2194,9 @@ class KIMODO_OT_GenerateVariations(Operator):
         s = context.scene.kimodo
 
         if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+            label = "ARDY" if s.backend == 'ARDY' else "Kimodo"
+            self.report({'WARNING'},
+                        f"{label} is not running — click 'Start {label}' first.")
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating — please wait.")
@@ -2105,12 +2226,14 @@ class KIMODO_OT_GenerateVariations(Operator):
 
         self._thread = threading.Thread(
             target=self._run_one,
-            args=(s.prompt, s.duration, seed, s.output_format, s.bvh_standard_tpose),
+            args=(s.prompt, s.duration, seed, s.output_format,
+                  s.bvh_standard_tpose, _ardy_kwargs(s)),
             daemon=True,
         )
         self._thread.start()
 
-    def _run_one(self, prompt, duration, seed, fmt, bvh_standard_tpose):
+    def _run_one(self, prompt, duration, seed, fmt, bvh_standard_tpose,
+                 backend_kwargs=None):
         def progress_cb(msg):
             _generation_state["progress"] = msg
 
@@ -2122,6 +2245,7 @@ class KIMODO_OT_GenerateVariations(Operator):
             constraints_json=None,
             bvh_standard_tpose=bvh_standard_tpose,
             progress_callback=progress_cb,
+            **(backend_kwargs or {}),
         )
         _generation_state["success"] = success
         _generation_state["result"]  = result
