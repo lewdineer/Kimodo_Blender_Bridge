@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.7.3] — 2026-08-21
+
+### Fixed
+
+- **Any ARDY generation using a Root XZ constraint with a heading crashed**: `shape mismatch: value tensor of shape [N, 2, 2] cannot be broadcast to indexing result of shape [N, 2]`. Headings are one of the few places the two models genuinely disagree: Kimodo takes them as `[cos θ, sin θ]` pairs, which is what the add-on emits, while ARDY's `Root2DConstraintSet` takes **radians** and does the cos/sin conversion itself. Handing it pairs made it stack cos/sin over an already-2D tensor. The ARDY bridge now converts on the way in, so the add-on keeps emitting one format rather than branching on the backend. This hit Live Stream on every step — steering always sets a heading — and equally hit a plain *Generate* whenever a Root XZ waypoint had its heading enabled, including waypoints produced by *Sample Curve as Waypoints*.
+
 ## [1.7.2] — 2026-08-21
 
 ### Fixed

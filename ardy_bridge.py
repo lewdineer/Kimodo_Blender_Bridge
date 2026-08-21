@@ -128,12 +128,43 @@ def _normalise_prompt(text: str) -> str:
 # Constraints
 # ---------------------------------------------------------------------------
 
+def _headings_to_radians(data) -> None:
+    """Rewrite Kimodo-style [cos, sin] headings into the radians ARDY wants.
+
+    This is the one place the two constraint formats genuinely differ.  The
+    add-on emits headings as [cos, sin] pairs because that is what Kimodo takes
+    (constraints.py::heading_from_angle).  ARDY's Root2DConstraintSet does that
+    cos/sin conversion *itself* in update_constraints(), so handing it pairs
+    makes it stack cos/sin over an already-2D tensor and the model then dies
+    with "value tensor of shape [N, 2, 2] cannot be broadcast to indexing
+    result of shape [N, 2]".
+
+    Modifies *data* in place.  Scalars are left alone, so a caller that already
+    speaks ARDY's units (the live stream) passes through untouched.
+    """
+    for block in data:
+        if not isinstance(block, dict):
+            continue
+        headings = block.get("global_root_heading")
+        if not headings:
+            continue
+        converted = []
+        for entry in headings:
+            if isinstance(entry, (list, tuple)) and len(entry) == 2:
+                cos_v, sin_v = entry
+                converted.append(math.atan2(sin_v, cos_v))
+            else:
+                converted.append(entry)          # already an angle
+        block["global_root_heading"] = converted
+
+
 def _load_constraints(constraints_json, skeleton):
     """Parse the add-on's constraint JSON into ARDY constraint objects.
 
     The JSON the add-on emits (constraints.py::build_constraints_json) is
-    already in ARDY's format: the same type strings, and from_dict() accepts
-    'smooth_root_2d' as an alias for 'root_2d'.  Nothing is translated here.
+    otherwise already in ARDY's format: the same type strings, and from_dict()
+    accepts 'smooth_root_2d' as an alias for 'root_2d'.  Only the heading units
+    differ — see _headings_to_radians.
     """
     if not constraints_json:
         return []
@@ -146,6 +177,7 @@ def _load_constraints(constraints_json, skeleton):
               "message": f"Warning: constraints skipped (bad JSON: {exc})"})
         return []
     try:
+        _headings_to_radians(data)
         return load_constraints_lst(data, skeleton)
     except Exception as exc:
         _out({"status": "progress",
@@ -574,9 +606,8 @@ class _Stream:
         heading = (target_heading if target_heading is not None
                    else ardy_steer.heading_from_waypoints(waypoints))
         if heading is not None:
-            block["global_root_heading"] = [
-                [math.cos(heading), math.sin(heading)] for _ in waypoints
-            ]
+            # Radians, not [cos, sin]: ARDY does that conversion itself.
+            block["global_root_heading"] = [float(heading)] * len(waypoints)
         return [block]
 
     # -- the step itself ----------------------------------------------------

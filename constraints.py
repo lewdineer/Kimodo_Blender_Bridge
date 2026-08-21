@@ -305,7 +305,13 @@ def euler_to_axis_angle_vec(e: mathutils.Euler) -> list[float]:
 
 
 def heading_from_angle(angle_rad: float) -> list[float]:
-    """Kimodo expects heading as [cos(θ), sin(θ)]."""
+    """Kimodo expects heading as [cos(θ), sin(θ)].
+
+    ARDY does not: its Root2DConstraintSet takes radians and does the cos/sin
+    itself.  Do not "fix" this to emit radians — the ARDY bridge converts on
+    the way in (ardy_bridge.py::_headings_to_radians), which keeps this module
+    speaking one format instead of branching on the backend.
+    """
     return [math.cos(angle_rad), math.sin(angle_rad)]
 
 

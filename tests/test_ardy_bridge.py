@@ -111,6 +111,36 @@ check(events("call")[-1]["constrained"] is True, "constraints reached the model 
 PP = events("postprocess")
 check(len(PP) > 0 and PP[-1]["constraints"] == 1, "post-processing received the constraint list")
 
+# --- heading units --------------------------------------------------------
+# The add-on emits headings as [cos, sin] (Kimodo's format); ARDY wants
+# radians and stacks cos/sin itself. Passing the pairs through untouched made
+# the model die with "value tensor of shape [N, 2, 2] cannot be broadcast to
+# indexing result of shape [N, 2]" -- for streaming and for a plain generate
+# with a heading-bearing Root XZ constraint alike.
+import math as _math
+angles = [0.0, _math.pi / 2, -_math.pi / 3]
+cons = json.dumps([{"type": "root2d",
+                    "frame_indices": [0, 10, 20],
+                    "smooth_root_2d": [[0, 0], [1, 1], [2, 2]],
+                    "global_root_heading": [[_math.cos(a), _math.sin(a)] for a in angles]}])
+send({"cmd": "generate", "prompt": "walk", "duration": 2.0, "seed": 1,
+      "output_format": "bvh", "constraints_json": cons})
+done = read_until("done", "error")[-1]
+check(done["status"] == "done",
+      f"[cos, sin] headings are accepted ({done.get('message','')})")
+check(events("call")[-1]["constrained"] is True,
+      "  and still reach the model as conditioning")
+
+# Radians must pass through untouched -- the live stream already sends those.
+cons = json.dumps([{"type": "root2d",
+                    "frame_indices": [0, 10],
+                    "smooth_root_2d": [[0, 0], [1, 1]],
+                    "global_root_heading": [0.0, 1.5]}])
+send({"cmd": "generate", "prompt": "walk", "duration": 2.0, "seed": 1,
+      "output_format": "bvh", "constraints_json": cons})
+check(read_until("done", "error")[-1]["status"] == "done",
+      "radian headings pass through unchanged")
+
 # --- bad constraint JSON must not kill the job ---------------------------
 # malformed constraints
 send({"cmd": "generate", "prompt": "walk", "duration": 1.0, "seed": 1,
@@ -188,6 +218,10 @@ check(len(first["root_positions"]) == first["frames"], "one root position per fr
 
 step1 = events("ar_step")[-1]
 check(step1["hist"] == 0, "the first step has no history")
+# If steering emitted [cos, sin] pairs the mock constraint would have raised
+# before the model was ever called, exactly as the real one did.
+check(step1["constrained"] is True,
+      "  steering headings are radians, so conditioning was built")
 check(step1["steps"] == 6, "the requested denoising steps are honoured")
 check(step1["constrained"] is True, "a follow target reaches the model as conditioning")
 

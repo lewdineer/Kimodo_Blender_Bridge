@@ -48,6 +48,18 @@ class _MotionRep:
         obs = torch.zeros(B, T, self.D, device=device)
         mask = torch.zeros(B, T, self.D, device=device)
         for c in lst:
+            heading = getattr(c, "global_root_heading", None)
+            if heading is not None:
+                # Root2DConstraintSet.update_constraints stacks cos/sin on the
+                # last dim itself, so it must be handed ANGLES IN RADIANS.
+                # Given Kimodo's [cos, sin] pairs this yields a rank-3 tensor
+                # and the assignment below fails the same way the real model
+                # does: "value tensor of shape [N, 2, 2] cannot be broadcast to
+                # indexing result of shape [N, 2]".
+                stacked = torch.stack([torch.cos(heading), torch.sin(heading)], dim=-1)
+                n = int(c.frame_indices.shape[0])
+                slot = torch.zeros(n, 2, device=device)
+                slot[:] = stacked          # raises on a [n, 2, 2] value
             for f in c.frame_indices.tolist():
                 if 0 <= f < T:
                     mask[:, f, :3] = 1.0
