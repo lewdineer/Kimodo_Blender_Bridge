@@ -103,6 +103,93 @@ def project_root_waypoints(
     return waypoints
 
 
+def project_root_waypoints_from_velocity(
+    current_xz,
+    current_vel_xz,
+    target_vel_xz,
+    fps: float,
+    num_frames: int,
+    transition_seconds: float = DEFAULT_TRANSITION_SECONDS,
+):
+    """Future root positions for "keep walking at this velocity".
+
+    The sibling of :func:`project_root_waypoints` for driving with keys rather
+    than a target object: there is no destination to arrive at, so no distance
+    cap and no arrival dead zone — just ease from the current velocity onto the
+    requested one and integrate.
+
+    A zero target velocity returns ``[]`` rather than a wall of
+    stand-still waypoints: pinning the root to one spot every frame stops the
+    character shifting its weight or turning on the spot, and reads as frozen.
+    """
+    if num_frames <= 0 or fps <= 0:
+        return []
+
+    tvx, tvz = float(target_vel_xz[0]), float(target_vel_xz[1])
+    if _norm(tvx, tvz) < 1e-6:
+        return []
+
+    px, pz = float(current_xz[0]), float(current_xz[1])
+    vx, vz = float(current_vel_xz[0]), float(current_vel_xz[1])
+
+    dt = 1.0 / fps
+    transition_frames = max(1, int(round(transition_seconds * fps)))
+
+    waypoints = []
+    for i in range(num_frames):
+        alpha = min(1.0, (i + 1) / transition_frames)
+        px += ((1.0 - alpha) * vx + alpha * tvx) * dt
+        pz += ((1.0 - alpha) * vz + alpha * tvz) * dt
+        waypoints.append((i, [px, pz]))
+    return waypoints
+
+
+def steer_velocity(velocity, key, speed_step: float = 0.2,
+                   turn_degrees: float = 30.0, max_speed: float = 5.0):
+    """One arrow-key press applied to a persistent target velocity.
+
+    Mirrors ARDY's interactive demo (``CameraMixin.on_arrow_key_press``): the
+    velocity persists between presses, up/down are a throttle and left/right a
+    steering wheel. It is not hold-to-walk — one press nudges and the character
+    keeps going, which is why no key-release tracking is needed.
+
+    *key* is one of ``UP_ARROW`` / ``DOWN_ARROW`` / ``LEFT_ARROW`` /
+    ``RIGHT_ARROW`` (Blender's own event type names). Anything else returns the
+    velocity unchanged.
+    """
+    vx, vz = float(velocity[0]), float(velocity[1])
+    speed = _norm(vx, vz)
+
+    if key == 'UP_ARROW':
+        if speed < 1e-6:
+            # From a standstill there is no direction to scale, so start
+            # forward: +z is ARDY's ground-forward axis.
+            vx, vz = 0.0, speed_step
+        else:
+            scale = (speed + speed_step) / speed
+            vx, vz = vx * scale, vz * scale
+
+    elif key == 'DOWN_ARROW':
+        slower = max(0.0, speed - speed_step)
+        if speed > 1e-6:
+            scale = slower / speed if slower > 1e-6 else 0.0
+            vx, vz = vx * scale, vz * scale
+
+    elif key in ('LEFT_ARROW', 'RIGHT_ARROW'):
+        # Left turns anticlockwise about the up axis, right clockwise.
+        angle = math.radians(turn_degrees if key == 'RIGHT_ARROW' else -turn_degrees)
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        vx, vz = cos_a * vx - sin_a * vz, sin_a * vx + cos_a * vz
+
+    else:
+        return (vx, vz)
+
+    # Clamp per axis, as the demo does, so a long press cannot run away.
+    vx = max(-max_speed, min(max_speed, vx))
+    vz = max(-max_speed, min(max_speed, vz))
+    return (vx, vz)
+
+
 # ---------------------------------------------------------------------------
 # ARDY space -> Blender space
 # ---------------------------------------------------------------------------

@@ -175,6 +175,7 @@ class _FakeK:
     generating_segment_index = 3
     is_streaming = True
     stream_status = "Streaming…"
+    ardy_stream_velocity = (1.5, -0.5)
 
 
 _scene = type("S", (), {"kimodo": _FakeK()})()
@@ -191,6 +192,8 @@ check(k.generation_progress == "", "  and its progress text is cleared")
 check(k.generating_segment_index == -1, "  and its segment index is cleared")
 check(k.is_streaming is False, "a loaded file never stays 'streaming'")
 check(k.stream_status == "", "  and its stream status is cleared")
+check(tuple(k.ardy_stream_velocity) == (0.0, 0.0),
+      "  and the arrow-key drive velocity is back to a standstill")
 
 addon.unregister()
 check(bpy.REGISTERED == [], "unregister removes every class")

@@ -396,6 +396,35 @@ class KIMODO_SceneSettings(PropertyGroup):
     )
 
     # --- Live streaming (ARDY only) ---
+    ardy_stream_control: EnumProperty(
+        name="Control",
+        description="How the character is steered while a stream runs",
+        items=[
+            ('TARGET', "Follow Object",
+             "Walk toward an object you move around the scene"),
+            ('KEYS', "Arrow Keys",
+             "Drive with the arrow keys: up/down are a throttle, left/right "
+             "steer. The velocity persists, so one press keeps the character "
+             "going — it is not hold-to-walk"),
+        ],
+        default='TARGET',
+    )
+    ardy_stream_velocity: FloatVectorProperty(
+        name="Velocity",
+        description="Target ground velocity the arrow keys are driving, in "
+                    "metres per second (ARDY's x / forward axes)",
+        size=2, default=(0.0, 0.0),
+    )
+    ardy_stream_speed_step: FloatProperty(
+        name="Speed Step",
+        description="How much one up/down press changes the speed",
+        default=0.2, min=0.01, max=2.0,
+    )
+    ardy_stream_turn_degrees: FloatProperty(
+        name="Turn Step",
+        description="How far one left/right press turns the direction",
+        default=30.0, min=1.0, max=180.0,
+    )
     ardy_stream_target: PointerProperty(
         name="Follow",
         description="Object the character walks toward while the stream runs. "
@@ -781,6 +810,8 @@ def _reset_transient_generation_state() -> None:
             k.is_streaming = False
         if k.stream_status:
             k.stream_status = ""
+        if tuple(k.ardy_stream_velocity) != (0.0, 0.0):
+            k.ardy_stream_velocity = (0.0, 0.0)
 
 
 @bpy.app.handlers.persistent

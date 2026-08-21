@@ -181,7 +181,9 @@ Why this only exists for ARDY: it is autoregressive, generating one short window
 - Raise **Buffer Frames** so more motion is generated ahead of the playhead.
 - Use the `core8` checkpoint (8-frame windows) instead of the default 40-frame one.
 
-**If the character reacts sluggishly** to the target, lower **Commit Frames** — that is how much of the near future is locked in and cannot be re-planned.
+**If the character reacts sluggishly** to the target, lower **Re-plan Every** (how often the target is re-read) or **Commit Frames** (how much of the near future is locked in and cannot be re-planned).
+
+**Driving with the keyboard**: set **Control** to *Arrow Keys* instead of *Follow Object*. `↑` / `↓` change speed, `←` / `→` turn. The velocity persists between presses — one tap and the character keeps walking until you slow it back down. While a stream is running the arrow keys are captured, so they will not step frames; that goes back to normal when you stop.
 
 ### Retarget to your own rig
 
@@ -225,7 +227,7 @@ To add a constraint:
 |---|---|
 | **Connection** | Backend selector, install / Python path, model selector, Start / Stop bridge |
 | **Generate** | Single Clip mode (one prompt, duration, seed) or Timeline mode (segment list, frame ranges) — one Generate Motion button either way, plus Sample Steps |
-| **Live Stream** | ARDY only: follow-target, streaming controls, Start / Stop |
+| **Live Stream** | ARDY only: follow an object or drive with the arrow keys, streaming controls, Start / Stop |
 | **Motion Constraints** | Spatial waypoints for the generated motion |
 | **Retarget** | Bone mapping, Apply Constraints, Bake |
 | **Help** | Quick-start checklist, VRAM tip |

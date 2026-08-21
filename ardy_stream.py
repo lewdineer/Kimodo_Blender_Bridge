@@ -53,13 +53,14 @@ def _reset_state():
     _state.update(running=False, done=False, ok=False, result=None)
 
 
-def _worker(frame_idx, target_xz, target_heading, prompt,
+def _worker(frame_idx, target_xz, target_heading, target_velocity, prompt,
             replan_buffer, max_speed, timeout):
     started = time.monotonic()
     ok, result = sc.stream_step(
         frame_idx=frame_idx,
         target_xz=target_xz,
         target_heading=target_heading,
+        target_velocity=target_velocity,
         prompt=prompt,
         replan_buffer=replan_buffer,
         max_speed=max_speed,
@@ -77,6 +78,9 @@ def _worker(frame_idx, target_xz, target_heading, prompt,
 # ---------------------------------------------------------------------------
 
 STREAM_ARMATURE_NAME = "ARDY_Stream"
+
+# Blender's event names for the four arrows, in the demo's throttle/steer roles.
+_ARROW_KEYS = {'UP_ARROW', 'DOWN_ARROW', 'LEFT_ARROW', 'RIGHT_ARROW'}
 
 # Fallback bone length for a joint with no children (hands, toes, head).
 _LEAF_BONE_LENGTH = 0.08
@@ -452,6 +456,7 @@ class KIMODO_OT_ArdyStream(Operator):
         s.source_armature = arm
         s.is_streaming = True
         s.stream_status = "Starting…"
+        s.ardy_stream_velocity = (0.0, 0.0)
         _reset_state()
 
         if s.ardy_stream_autoplay and not context.screen.is_animation_playing:
@@ -468,6 +473,23 @@ class KIMODO_OT_ArdyStream(Operator):
 
         if event.type in {'ESC'} or not s.is_streaming:
             return self._finish(context, "Stopped")
+
+        # Arrow keys drive the character while the stream runs. They are
+        # consumed rather than passed through: Blender binds them to frame
+        # stepping, and stepping the playhead by hand mid-stream fights the
+        # replan. They go back to normal the moment the stream ends.
+        if (s.ardy_stream_control == 'KEYS' and event.value == 'PRESS'
+                and event.type in _ARROW_KEYS):
+            s.ardy_stream_velocity = ardy_steer.steer_velocity(
+                tuple(s.ardy_stream_velocity), event.type,
+                speed_step=s.ardy_stream_speed_step,
+                turn_degrees=s.ardy_stream_turn_degrees,
+            )
+            # Re-plan on the next tick rather than waiting out the interval,
+            # so a key press is felt immediately.
+            self._last_plan_frame = -10 ** 6
+            self._redraw(context)
+            return {'RUNNING_MODAL'}
 
         if event.type != 'TIMER':
             return {'PASS_THROUGH'}
@@ -525,10 +547,10 @@ class KIMODO_OT_ArdyStream(Operator):
         stale = since >= max(1, s.ardy_stream_replan_interval)
         starving = ahead < s.ardy_stream_lead_frames
         if not (stale or starving):
-            s.stream_status = self._status_line(ahead)
+            s.stream_status = self._status_line(ahead, s)
             return
 
-        target_xz, heading = self._target(context, s)
+        target_xz, heading, target_velocity = self._target(context, s)
         prompt = s.prompt if s.prompt != self._last_prompt else None
         self._last_prompt = s.prompt
         self._last_plan_frame = playhead
@@ -537,27 +559,39 @@ class KIMODO_OT_ArdyStream(Operator):
         self._thread = threading.Thread(
             target=_worker,
             args=(max(0, playhead - self._start_frame), target_xz, heading,
-                  prompt, s.ardy_stream_replan_buffer, s.ardy_stream_max_speed,
-                  120.0),
+                  target_velocity, prompt, s.ardy_stream_replan_buffer,
+                  s.ardy_stream_max_speed, 120.0),
             daemon=True,
         )
         self._thread.start()
-        s.stream_status = self._status_line(ahead)
+        s.stream_status = self._status_line(ahead, s)
 
     def _target(self, context, s):
-        """The follow target's ground position in ARDY space, or (None, None)."""
+        """What to steer by this step: (position, heading, velocity).
+
+        Exactly one of position or velocity is ever set — arrow-key driving and
+        object-following are alternative controls, not layers.
+        """
+        if s.ardy_stream_control == 'KEYS':
+            return None, None, list(s.ardy_stream_velocity)
+
         obj = s.ardy_stream_target
         if obj is None:
-            return None, None
+            return None, None, None
         from . import constraints as cmod
         loc = obj.matrix_world.translation
-        return list(cmod.blender_to_kimodo_2d(loc)), None
+        return list(cmod.blender_to_kimodo_2d(loc)), None, None
 
-    def _status_line(self, ahead):
+    def _status_line(self, ahead, s=None):
         step = _state.get("step_seconds", 0.0)
         budget = self._horizon / self._fps if self._fps else 0.0
         note = "" if step <= budget or not step else "  (GPU behind)"
-        return f"Streaming — {max(0, ahead)} frames buffered, {step:.2f}s/step{note}"
+        drive = ""
+        if s is not None and s.ardy_stream_control == 'KEYS':
+            vx, vz = s.ardy_stream_velocity
+            drive = f"  ·  {(vx * vx + vz * vz) ** 0.5:.1f} m/s"
+        return (f"Streaming — {max(0, ahead)} frames buffered, "
+                f"{step:.2f}s/step{note}{drive}")
 
     def _redraw(self, context):
         for area in context.screen.areas:

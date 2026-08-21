@@ -93,6 +93,73 @@ check(S.heading_from_waypoints([(0, [1.0, 1.0]), (1, [1.0, 1.0])], fallback=0.5)
       "a stationary path falls back rather than reading noise as a heading")
 
 
+# --- arrow-key driving -----------------------------------------------------
+# ARDY's demo treats the arrows as a throttle and a steering wheel over a
+# *persistent* velocity, not hold-to-walk. Getting that wrong would either
+# stop the character the instant a key is released, or make turning also
+# change speed.
+
+ZERO = (0.0, 0.0)
+
+v = S.steer_velocity(ZERO, 'UP_ARROW', speed_step=0.2)
+check(abs(v[0]) < 1e-9 and abs(v[1] - 0.2) < 1e-9,
+      "from a standstill, up starts moving forward along +z")
+
+v = S.steer_velocity(v, 'UP_ARROW', speed_step=0.2)
+check(abs(math.hypot(*v) - 0.4) < 1e-9, "  each up press adds one speed step")
+
+v = S.steer_velocity(v, 'DOWN_ARROW', speed_step=0.2)
+check(abs(math.hypot(*v) - 0.2) < 1e-9, "down takes one step back off")
+
+v = S.steer_velocity(v, 'DOWN_ARROW', speed_step=0.2)
+check(math.hypot(*v) < 1e-9, "  and reaches a clean stop")
+v = S.steer_velocity(v, 'DOWN_ARROW', speed_step=0.2)
+check(math.hypot(*v) < 1e-9, "  further presses cannot drive it negative")
+
+# Turning must preserve speed: a steering wheel is not a throttle.
+fast = S.steer_velocity(ZERO, 'UP_ARROW', speed_step=1.0)
+turned = S.steer_velocity(fast, 'RIGHT_ARROW', turn_degrees=90.0)
+check(abs(math.hypot(*turned) - math.hypot(*fast)) < 1e-9,
+      "turning changes direction without changing speed")
+# Sign convention copied verbatim from the demo's rotation matrix: a right
+# quarter-turn from +z lands on -x. Which way that reads on screen depends on
+# ARDY's handedness and has not been verified against a running Blender; if
+# left/right feel swapped in use, this matrix is the single place to flip.
+check(abs(turned[0] + 1.0) < 1e-6 and abs(turned[1]) < 1e-6,
+      "  a right quarter-turn from +z lands on -x, as in ARDY's demo")
+back = S.steer_velocity(turned, 'LEFT_ARROW', turn_degrees=90.0)
+check(abs(back[0]) < 1e-6 and abs(back[1] - 1.0) < 1e-6,
+      "  and left turns exactly back again")
+
+# Turning while stopped stays stopped -- there is no direction to rotate.
+check(math.hypot(*S.steer_velocity(ZERO, 'RIGHT_ARROW')) < 1e-9,
+      "turning on the spot from a standstill does not start movement")
+
+check(S.steer_velocity((0.7, 0.3), 'SPACE') == (0.7, 0.3),
+      "a key we do not handle leaves the velocity alone")
+
+capped = ZERO
+for _ in range(200):
+    capped = S.steer_velocity(capped, 'UP_ARROW', speed_step=0.2, max_speed=5.0)
+check(max(abs(c) for c in capped) <= 5.0 + 1e-9,
+      "speed is clamped so a held key cannot run away")
+
+# --- driving by velocity ---------------------------------------------------
+path = S.project_root_waypoints_from_velocity(
+    (0.0, 0.0), ZERO, (0.0, 1.0), fps=FPS, num_frames=HORIZON)
+check(len(path) == HORIZON, "a velocity path covers the whole horizon")
+check(path[-1][1][1] > path[0][1][1], "  and advances along the target velocity")
+steps = [_dist(path[i - 1][1], path[i][1]) for i in range(1, len(path))]
+check(steps[-1] > steps[0], "  easing in from a standstill, not jumping to speed")
+
+check(S.project_root_waypoints_from_velocity(
+          (0.0, 0.0), ZERO, ZERO, fps=FPS, num_frames=HORIZON) == [],
+      "a zero velocity leaves the model unconstrained rather than pinning it")
+check(S.project_root_waypoints_from_velocity(
+          (0, 0), ZERO, (1, 0), fps=0, num_frames=HORIZON) == [],
+      "  zero fps emits nothing rather than dividing by zero")
+
+
 # --- rebasing a joint rotation onto an oriented bone -----------------------
 # This is the maths that decides whether the streamed rig animates correctly.
 # It cannot be checked against Blender here, so instead simulate Blender's own

@@ -759,8 +759,19 @@ class KIMODO_PT_LiveStream(KIMODO_PanelBase, Panel):
             live.prop(s, "ardy_stream_max_speed")
             live.prop(s, "ardy_stream_lead_frames")
             layout.separator(factor=0.5)
-            layout.label(text="Move the target and the motion re-plans to follow.",
-                         icon='INFO')
+            if s.ardy_stream_control == 'KEYS':
+                vx, vz = s.ardy_stream_velocity
+                drive = layout.box()
+                drive.label(
+                    text=f"Driving at {(vx * vx + vz * vz) ** 0.5:.2f} m/s",
+                    icon='PLAY')
+                drive.label(text="↑ / ↓  speed     ← / →  turn", icon='BLANK1')
+                drive.label(text="Arrow keys are captured while streaming, so "
+                                 "they will not step frames.", icon='BLANK1')
+            else:
+                layout.label(
+                    text="Move the target and the motion re-plans to follow.",
+                    icon='INFO')
             layout.label(text="Esc also stops the stream.", icon='BLANK1')
             return
 
@@ -768,10 +779,24 @@ class KIMODO_PT_LiveStream(KIMODO_PanelBase, Panel):
         layout.separator(factor=0.5)
 
         layout.prop(s, "prompt", text="Prompt")
-        target_row = layout.row(align=True)
-        target_row.prop(s, "ardy_stream_target", text="Follow", icon='EMPTY_ARROWS')
-        if s.ardy_stream_target is None:
-            layout.label(text="No target: walks to the prompt alone.", icon='BLANK1')
+
+        mode_row = layout.row(align=True)
+        mode_row.prop(s, "ardy_stream_control", expand=True)
+
+        if s.ardy_stream_control == 'KEYS':
+            keys = layout.column(align=True)
+            keys.label(text="↑ / ↓  speed     ← / →  turn", icon='EVENT_A')
+            keys.prop(s, "ardy_stream_speed_step")
+            keys.prop(s, "ardy_stream_turn_degrees")
+            layout.label(text="The velocity persists — one press keeps going.",
+                         icon='BLANK1')
+        else:
+            target_row = layout.row(align=True)
+            target_row.prop(s, "ardy_stream_target", text="Follow",
+                            icon='EMPTY_ARROWS')
+            if s.ardy_stream_target is None:
+                layout.label(text="No target: walks to the prompt alone.",
+                             icon='BLANK1')
 
         layout.separator(factor=0.5)
         col = layout.column(align=True)

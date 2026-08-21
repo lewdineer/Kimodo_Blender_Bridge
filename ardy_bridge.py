@@ -577,24 +577,35 @@ class _Stream:
                float(cur[2] - prev[2]) * self.ctx.fps)
         return pos, vel
 
-    def steer_constraints(self, target_xz, target_heading, at_idx: int,
-                          history_length: int):
-        """Root waypoints toward *target_xz*, as add-on-format constraint JSON.
+    def steer_constraints(self, target_xz, target_heading, target_velocity,
+                          at_idx: int, history_length: int):
+        """Root waypoints as add-on-format constraint JSON, or [] for none.
+
+        Two ways to steer: toward a point (following an object) or along a
+        velocity (driving with keys). Velocity wins when both are given, since
+        a key press is a deliberate override.
 
         Frame indices are relative to the model call's window, offset past the
         history so the already-fixed frames carry no constraint.
         """
-        if target_xz is None:
-            return []
         import ardy_steer
 
         pos, vel = self._root_state(at_idx)
-        waypoints = ardy_steer.project_root_waypoints(
-            pos, vel, target_xz,
-            fps=self.ctx.fps,
-            num_frames=self.ctx.gen_horizon_len,
-            max_speed=self.max_speed,
-        )
+        if target_velocity is not None:
+            waypoints = ardy_steer.project_root_waypoints_from_velocity(
+                pos, vel, target_velocity,
+                fps=self.ctx.fps,
+                num_frames=self.ctx.gen_horizon_len,
+            )
+        elif target_xz is not None:
+            waypoints = ardy_steer.project_root_waypoints(
+                pos, vel, target_xz,
+                fps=self.ctx.fps,
+                num_frames=self.ctx.gen_horizon_len,
+                max_speed=self.max_speed,
+            )
+        else:
+            return []
         if not waypoints:
             return []
 
@@ -618,6 +629,7 @@ class _Stream:
         frame_idx = int(req.get("frame_idx", 0))
         target_xz = req.get("target_xz")
         target_heading = req.get("target_heading")
+        target_velocity = req.get("target_velocity")
 
         # Live settings: re-sent each step so moving a slider takes effect
         # without restarting the stream.
@@ -636,6 +648,7 @@ class _Stream:
         text_feat, text_pad_mask = self.text_features(req.get("prompt"))
 
         blocks = self.steer_constraints(target_xz, target_heading,
+                                        target_velocity,
                                         end_idx if end_idx >= 0 else 0,
                                         history_length)
         constraint_lst = _load_constraints(json.dumps(blocks), ctx.model.skeleton) if blocks else []

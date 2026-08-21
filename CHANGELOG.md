@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.8.0] — 2026-08-21
+
+### Added
+
+- **Drive the character with the arrow keys** (#52): the Live Stream panel now has a **Control** switch — *Follow Object* as before, or *Arrow Keys*. This mirrors what ARDY's own demo does (`CameraMixin.on_arrow_key_press`): ↑ and ↓ are a throttle, ← and → a steering wheel, over a velocity that **persists** between presses. It is not hold-to-walk — one press and the character keeps going until you slow it down, which is why no key-release tracking is involved. The step sizes for both are adjustable, the panel shows the current speed while driving, and a press re-plans immediately rather than waiting out the re-plan interval.
+- **Steering by velocity, not just position**: following an object projects a path toward a point; driving projects one along a velocity, with no arrival clamp. A zero velocity emits no constraint at all rather than pinning the root in place, so a stopped character can still shift its weight and turn instead of freezing.
+
+### Note
+
+- **Arrow keys are captured while a stream runs**, so they will not step frames during that time — Blender binds them to frame navigation, and stepping the playhead by hand mid-stream fights the re-plan. They behave normally again the moment the stream ends.
+
 ## [1.7.6] — 2026-08-21
 
 ### Added
