@@ -151,11 +151,38 @@ class _Ops:
 ops = _Ops()
 
 
+class _Collection(list):
+    """A bpy data collection: a list that also removes the way Blender does.
+
+    Blender's remove() takes keyword arguments (do_unlink, do_id_user, ...)
+    that plain list.remove rejects, and it tolerates removing something that
+    is not in the collection. Both matter to code under test, which calls
+    bpy.data.objects.remove(obj, do_unlink=True) on freshly built fakes.
+    """
+
+    def remove(self, item, **kwargs):
+        try:
+            super().remove(item)
+        except ValueError:
+            pass
+
+    def get(self, name, default=None):
+        for item in self:
+            if getattr(item, "name", None) == name:
+                return item
+        return default
+
+    def new(self, name, *a, **kw):
+        obj = type("_DataBlock", (), {"name": name, "users": 0})()
+        self.append(obj)
+        return obj
+
+
 class _Data:
-    scenes = []
-    objects = []
-    actions = []
-    armatures = []
+    scenes = _Collection()
+    objects = _Collection()
+    actions = _Collection()
+    armatures = _Collection()
 
 
 data = _Data()

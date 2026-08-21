@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.7.1] — 2026-08-21
+
+### Fixed
+
+- **Generating on one backend, switching, and generating again produced a broken armature**: the new motion landed on the previous backend's rig with mangled rotations and the character sunk into the floor. *Reuse Armature* keeps pointing at the last generated source armature across a backend switch, and the import path transferred the freshly generated Action onto it without checking the two were the same skeleton. They never are: Kimodo emits somaskel77 (77 bones) and ARDY emits cskel27 (27). Worse, the names that overlap mean different joints — SOMA's `LeftLeg` is the hip, Core27's is the knee — so a partial, wrong-looking pose was applied rather than nothing at all, and because the root location channel is relative to whichever rest pose the BVH import built, the character was also offset by the difference in rest hip height. Reuse now happens only between armatures with identical bone sets; a mismatch keeps the newly imported armature instead and says so in the system console. Switching backend also clears the *Reuse Armature* field, so it never shows a rig that is silently never going to be reused. Deleting the old armature by hand between backends was the workaround; it is no longer needed.
+
 ## [1.7.0] — 2026-08-21
 
 ### Added

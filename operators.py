@@ -554,14 +554,38 @@ def _bind_action_with_slot(obj: bpy.types.Object, action: bpy.types.Action) -> N
         ad.action_slot = slots[0]
 
 
+def _skeleton_signature(arm_obj) -> frozenset:
+    """The set of bone names identifying which model produced an armature."""
+    data = getattr(arm_obj, "data", None)
+    if data is None:
+        return frozenset()
+    return frozenset(b.name for b in data.bones)
+
+
 def _apply_to_existing_source(s, new_arm: bpy.types.Object) -> bpy.types.Object:
     """
     If reuse_armature is set, transfer the action from new_arm to it and
     delete new_arm.  Returns the armature that should be used going forward.
+
+    Reuse only happens between armatures of the *same* skeleton.  Kimodo emits
+    somaskel77 and ARDY emits cskel27: different bone counts, and the names
+    that do overlap mean different joints (SOMA's LeftLeg is the hip, Core27's
+    is the knee).  The root location channel is also relative to whatever rest
+    pose the BVH import built, so moving an action across skeletons lands
+    curves on the wrong joints *and* offsets the character by the difference in
+    rest hip height — it sinks through the floor.  Generating on one backend,
+    switching, and generating again used to do exactly that, because the
+    armature pointer survives the switch.
     """
     existing = s.reuse_armature
     if not existing or existing.type != 'ARMATURE' or existing == new_arm:
         return new_arm  # nothing to reuse — keep the freshly imported one
+
+    if _skeleton_signature(existing) != _skeleton_signature(new_arm):
+        print(f"[Kimodo] '{existing.name}' is a different skeleton "
+              f"({len(existing.data.bones)} bones vs {len(new_arm.data.bones)}) — "
+              f"keeping the new armature instead of reusing it.", flush=True)
+        return new_arm
 
     new_action = new_arm.animation_data.action if new_arm.animation_data else None
     old_action = existing.animation_data.action if existing.animation_data else None
