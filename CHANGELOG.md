@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.6] — 2026-08-21
+
+### Added
+
+- **Sample Steps in the Generate panel**: the denoising step count is now a setting rather than a hidden constant. Every generation path — Single Clip, Timeline, and Variations — was passing the client's built-in default of 100 with no way to change it, on either backend. More steps generally means cleaner motion and a longer wait; fewer is faster and can look noisier. Live Stream keeps its own separate dial, since a streamed window has to finish generating faster than it plays and wants a much lower number.
+- **The panel says when a model ignores the setting**: ARDY can only *subsample* its own diffusion schedule, so it silently clamps anything above the loaded checkpoint's ceiling. That ceiling is reported by the bridge when it starts, and the Generate panel now notes it once the value exceeds it, instead of letting a higher number look like it did something. Kimodo reports no ceiling and takes the value literally.
+
 ## [1.7.5] — 2026-08-21
 
 ### Fixed

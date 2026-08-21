@@ -188,6 +188,8 @@ for backend in ('KIMODO', 'ARDY'):
                           "  Live Stream exposes the latency dial")
 
                 if cls.__name__ == "KIMODO_PT_Generate":
+                    check("diffusion_steps" in sink["props"],
+                          "  Generate exposes the sample-steps dial")
                     joined = " ".join(sink["labels"])
                     want = "20" if backend == 'ARDY' else "30"
                     check(f"needs {want}" in joined,

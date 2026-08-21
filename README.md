@@ -224,7 +224,7 @@ To add a constraint:
 | Panel | What's in it |
 |---|---|
 | **Connection** | Backend selector, install / Python path, model selector, Start / Stop bridge |
-| **Generate** | Single Clip mode (one prompt, duration, seed) or Timeline mode (segment list, frame ranges) — one Generate Motion button either way |
+| **Generate** | Single Clip mode (one prompt, duration, seed) or Timeline mode (segment list, frame ranges) — one Generate Motion button either way, plus Sample Steps |
 | **Live Stream** | ARDY only: follow-target, streaming controls, Start / Stop |
 | **Motion Constraints** | Spatial waypoints for the generated motion |
 | **Retarget** | Bone mapping, Apply Constraints, Bake |

@@ -165,12 +165,18 @@ def _model_fps(s) -> float:
 
 
 def _ardy_kwargs(s) -> dict:
-    """Backend-specific generation arguments.
+    """Generation arguments beyond the shared prompt/duration/seed set.
 
-    Always safe to pass: bridge_server.py reads requests with req.get(), so the
-    Kimodo bridge ignores keys meant for ARDY.
+    Always safe to pass: both bridges read requests with req.get(), so the
+    Kimodo bridge ignores the keys meant only for ARDY.
+
+    diffusion_steps is the exception — both backends honour it. Kimodo takes it
+    literally; ARDY can only subsample its own schedule, so it clamps to the
+    checkpoint's ceiling (reported as max_diffusion_steps when the bridge
+    starts) rather than failing.
     """
     return {
+        "diffusion_steps": s.diffusion_steps,
         "cfg_text_weight": s.ardy_cfg_text_weight,
         "cfg_constraint_weight": s.ardy_cfg_constraint_weight,
         "history_frames": s.ardy_history_frames,
@@ -304,6 +310,9 @@ class KIMODO_OT_StartKimodo(Operator):
                     s.native_fps = float(info["fps"])
                 if info.get("skeleton"):
                     s.active_skeleton = str(info["skeleton"])
+                # ARDY reports the highest step count its schedule allows; the
+                # Kimodo bridge does not, so leave it at 0 = "no known ceiling".
+                s.native_max_steps = int(info.get("max_diffusion_steps") or 0)
             except Exception:
                 pass
             self.report({'INFO'}, f"{label} ready: {_start_state['message']}")

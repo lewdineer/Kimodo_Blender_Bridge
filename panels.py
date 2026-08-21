@@ -554,6 +554,16 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
         layout.separator()
 
         # --- Shared: output options ---
+        # Sample steps: the quality/speed dial, honoured by both backends.
+        # ARDY can only subsample its own schedule, so it clamps silently —
+        # say so rather than letting a higher number look like it did something.
+        steps_col = layout.column(align=True)
+        steps_col.prop(s, "diffusion_steps")
+        if s.native_max_steps > 0 and s.diffusion_steps > s.native_max_steps:
+            steps_col.label(
+                text=f"This model tops out at {s.native_max_steps} — "
+                     f"extra steps are ignored", icon='INFO')
+
         # "Standard T-pose" needs standard_t_pose_global_offsets_rots.p, which
         # only the SOMA skeleton ships. ARDY's Core skeleton has no such asset,
         # so the option would silently do nothing — hide it instead.

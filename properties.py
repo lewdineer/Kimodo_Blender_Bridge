@@ -324,6 +324,12 @@ class KIMODO_SceneSettings(PropertyGroup):
         description="Skeleton reported by the running bridge (soma / core)",
         default="soma",
     )
+    native_max_steps: IntProperty(
+        name="Model Step Ceiling",
+        description="Highest denoising step count the loaded model accepts. "
+                    "Reported by the bridge when it starts; 0 until then",
+        default=0, min=0,
+    )
     native_fps: FloatProperty(
         name="Model FPS",
         description="Frame rate the loaded model generates at. Kimodo is 30; "
@@ -536,6 +542,15 @@ class KIMODO_SceneSettings(PropertyGroup):
             ("npz", "NPZ",  "Kimodo native format (requires manual import)."),
         ],
         default="bvh",
+    )
+    diffusion_steps: IntProperty(
+        name="Sample Steps",
+        description="Denoising steps per generation. More steps generally means "
+                    "cleaner motion and a longer wait; fewer is faster and can "
+                    "look noisier. Kimodo's default is 100. ARDY subsamples its "
+                    "own schedule, so it silently caps this at whatever the "
+                    "loaded checkpoint supports",
+        default=100, min=1, max=1000,
     )
     bvh_standard_tpose: BoolProperty(
         name="Use Standard T-Pose",

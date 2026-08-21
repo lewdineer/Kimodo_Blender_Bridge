@@ -144,6 +144,27 @@ hinted = {n for n, _ in R._SOMA_BONE_MAP_HINTS} | {n for n, _ in R._CORE_EXTRA_H
 missing = sorted(core_names - hinted)
 check(not missing, f"every Core joint has a retarget hint (missing: {missing})")
 
+# --- generation arguments ---------------------------------------------------
+# Every generate path funnels through _ardy_kwargs, so a key missing here is a
+# setting the UI shows and the model never sees. diffusion_steps in particular
+# used to be absent, leaving the client's default of 100 in force no matter
+# what the panel said.
+O = sys.modules[PACKAGE + ".operators"]
+
+
+class _FakeGenSettings:
+    diffusion_steps = 37
+    ardy_cfg_text_weight = 2.5
+    ardy_cfg_constraint_weight = 1.5
+    ardy_history_frames = 0
+
+
+_kwargs = O._ardy_kwargs(_FakeGenSettings())
+check(_kwargs.get("diffusion_steps") == 37,
+      "sample steps reach the bridge instead of the client default")
+for _key in ("cfg_text_weight", "cfg_constraint_weight", "history_frames"):
+    check(_key in _kwargs, f"  {_key} is still passed through")
+
 # --- transient state (#43, and the same trap for live streaming) ------------
 # is_generating / is_streaming are scene properties, so Blender saves them into
 # the .blend. A loaded file can never have a live job, and a saved True leaves
