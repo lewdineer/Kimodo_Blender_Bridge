@@ -619,6 +619,13 @@ class _Stream:
         target_xz = req.get("target_xz")
         target_heading = req.get("target_heading")
 
+        # Live settings: re-sent each step so moving a slider takes effect
+        # without restarting the stream.
+        if req.get("replan_buffer") is not None:
+            self.replan_buffer = max(0, int(req["replan_buffer"]))
+        if req.get("max_speed") is not None:
+            self.max_speed = float(req["max_speed"])
+
         init_history, end_idx, history_length = self.history_window(frame_idx)
         start_index = end_idx + 1                 # absolute index of the first new frame
 

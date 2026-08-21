@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.7.4] — 2026-08-21
+
+### Fixed
+
+- **The streamed armature looked like a hedgehog**: every bone was built pointing along +Y so that rest rotations would be the identity and ARDY's joint rotations could be written onto pose bones with no conversion. The joints landed in the right places, but each bone's *shape* pointed wherever +Y ended up rotated to, so a posed rig fanned out in all directions. Bones now point at their first child the way a BVH import builds them — leaves continue the direction of their chain — and each rotation is rebased through its own and its parent's rest orientation (`basis = RL⁻¹ · RL_parent · R`), with the correction read back from Blender's own `bone.matrix_local` so it stays consistent with whatever Blender actually built. The root's location is likewise converted into bone space rather than being written as a world offset.
+- **Streaming only re-read the target once per generated window**: a step regenerates a whole horizon against the target's position at that instant, and the next step was only triggered once the buffer had drained — so on the default 40-frame model the character committed to a two-second plan and ignored the target until it ran out, which read as jagged, 40-frame-quantised following. A new **Re-plan Every** control decouples *how often the target is re-read* from *how much motion is buffered*; it defaults to 4 frames. Buffer depth still forces a step when generation falls behind, and the in-flight guard means re-planning can never outrun the GPU.
+- **Streaming settings were frozen at stream start**: *Commit Frames* and *Walk Speed* were sent once by `stream_begin`, so moving either slider mid-stream did nothing. They are now re-sent with every step and take effect on the next re-plan, and the panel shows them while a stream is running.
+- **Playback resumed too late after a stall**: the auto-resume threshold was a whole generation horizon of buffered frames, which on the 40-frame model meant long pauses. It now follows the buffer setting instead.
+
 ## [1.7.3] — 2026-08-21
 
 ### Fixed

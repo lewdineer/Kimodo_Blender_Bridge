@@ -27,6 +27,7 @@ import threading
 import time
 
 import bpy
+import mathutils
 from bpy.types import Operator
 
 from . import subprocess_client as sc
@@ -53,13 +54,16 @@ def _reset_state():
     _state.update(running=False, done=False, ok=False, result=None)
 
 
-def _worker(frame_idx, target_xz, target_heading, prompt, timeout):
+def _worker(frame_idx, target_xz, target_heading, prompt,
+            replan_buffer, max_speed, timeout):
     started = time.monotonic()
     ok, result = sc.stream_step(
         frame_idx=frame_idx,
         target_xz=target_xz,
         target_heading=target_heading,
         prompt=prompt,
+        replan_buffer=replan_buffer,
+        max_speed=max_speed,
         timeout=timeout,
     )
     _state["step_seconds"] = time.monotonic() - started
@@ -82,18 +86,19 @@ _LEAF_BONE_LENGTH = 0.08
 def _build_armature(context, rest: dict):
     """Create the armature the stream animates, from the bridge's rest tables.
 
-    Every bone is built pointing along +Y with zero roll, which makes each
-    bone's rest rotation the identity. That matters: with an identity rest, a
-    pose bone's quaternion *is* ARDY's local joint rotation, so applying a frame
-    needs no per-bone change of basis. An oriented rest pose (bones aimed at
-    their children, as a BVH import produces) would need every rotation
-    conjugated by ``bone.matrix_local``, and a mistake there shows up as a
-    subtly mangled rig rather than an exception — not a trade worth making for
-    a rig whose job is to drive a retarget.
+    Bones point at their first child, the way a BVH import builds them, so the
+    armature reads as a figure and retargeting has sensible bone axes to work
+    with. Leaves continue the direction of the chain they end.
 
-    The cost is cosmetic: the armature reads as parallel sticks rather than a
-    figure. Bone lengths still follow the distance to the first child, so the
-    proportions are recognisable.
+    That means rest rotations are *not* identity, so ARDY's local joint
+    rotations cannot be written onto pose bones as-is: each needs rebasing
+    through its own and its parent's rest orientation. The correction is
+    computed here, once, from Blender's own ``bone.matrix_local`` — deriving it
+    from Blender rather than from the offsets keeps it self-consistent with
+    whatever Blender actually built.
+
+    Returns the correction quaternion per bone alongside the armature; see
+    ``_apply_window`` for how it is applied.
     """
     names = rest["bone_names"]
     parents = rest["parents"]
@@ -133,19 +138,8 @@ def _build_armature(context, rest: dict):
     try:
         for i, name in enumerate(names):
             bone = arm_data.edit_bones.new(name)
-            head = rest_pos[i]
-            child = first_child.get(i)
-            if child is not None:
-                c = rest_pos[child]
-                length = max(
-                    _LEAF_BONE_LENGTH,
-                    ((c[0] - head[0]) ** 2 + (c[1] - head[1]) ** 2
-                     + (c[2] - head[2]) ** 2) ** 0.5,
-                )
-            else:
-                length = _LEAF_BONE_LENGTH
-            bone.head = head
-            bone.tail = (head[0], head[1] + length, head[2])
+            bone.head = rest_pos[i]
+            bone.tail = _rest_tail(rest_pos, parents, first_child, i)
             bone.roll = 0.0
         for i, name in enumerate(names):
             if parents[i] >= 0:
@@ -156,13 +150,69 @@ def _build_armature(context, rest: dict):
     for pb in arm_obj.pose.bones:
         pb.rotation_mode = 'QUATERNION'
 
+    # Rebasing terms, read back from what Blender actually built.
+    #
+    # Blender composes a pose as
+    #     pose_i = pose_parent @ (RL_parent^-1 @ RL_i) @ basis_i
+    # while ARDY's FK is  G_i = G_parent @ R_i.  Equating the rotations gives
+    #     basis_i = RL_i^-1 @ RL_parent @ R_i
+    # which is identity only when every rest orientation is identity — the
+    # earlier all-bones-point-+Y rig, which posed correctly but drew as a
+    # hedgehog because each bone's shape pointed wherever +Y was rotated to.
+    corrections = {}
+    identity = mathutils.Quaternion()
+    for i, name in enumerate(names):
+        rl = arm_data.bones[name].matrix_local.to_quaternion()
+        parent = parents[i]
+        rl_parent = (arm_data.bones[names[parent]].matrix_local.to_quaternion()
+                     if parent >= 0 else identity)
+        corrections[name] = rl.inverted() @ rl_parent
+
     # Tag it the way the rest of the add-on recognises a source rig, so the
     # Retarget panel accepts the result without any special-casing.
     arm_obj["kimodo_source"] = True
     arm_obj["ardy_stream"] = True
     arm_obj["kimodo_creation_time"] = time.time()
 
-    return arm_obj, names, root_idx, rest_pos[root_idx]
+    # The root's own rest rotation, needed to express its world translation as
+    # a bone-space location (pose_bone.location lives in bone space, not world).
+    root_name = names[root_idx]
+    root_rot_inv = arm_data.bones[root_name].matrix_local.to_quaternion().inverted()
+
+    return arm_obj, names, root_idx, rest_pos[root_idx], corrections, root_rot_inv
+
+
+def _rest_tail(rest_pos, parents, first_child, i):
+    """Where bone *i* points in the rest pose.
+
+    At its first child when it has one; otherwise it continues the direction it
+    arrived from, so a hand or toe sticks out along its chain rather than off
+    at an arbitrary angle.
+    """
+    head = rest_pos[i]
+    child = first_child.get(i)
+    if child is not None:
+        tail = rest_pos[child]
+        if _distance(head, tail) > 1e-6:
+            return tail
+
+    parent = parents[i]
+    if parent >= 0:
+        dx = head[0] - rest_pos[parent][0]
+        dy = head[1] - rest_pos[parent][1]
+        dz = head[2] - rest_pos[parent][2]
+        length = (dx * dx + dy * dy + dz * dz) ** 0.5
+        if length > 1e-6:
+            k = _LEAF_BONE_LENGTH / length
+            return (head[0] + dx * k, head[1] + dy * k, head[2] + dz * k)
+
+    # Nothing to derive a direction from: a zero-length bone is invalid, so
+    # fall back to straight up rather than letting Blender drop the bone.
+    return (head[0], head[1], head[2] + _LEAF_BONE_LENGTH)
+
+
+def _distance(a, b) -> float:
+    return ((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2 + (b[2] - a[2]) ** 2) ** 0.5
 
 
 def action_fcurves(action, slot=None):
@@ -279,7 +329,7 @@ def _write_channel(fcurve, start_frame: int, values):
 
 
 def _apply_window(curves, names, root_name, msg, scene_start_frame: int,
-                  root_rest):
+                  root_rest, corrections, root_rot_inv):
     """Keyframe one window of frames onto the armature.
 
     Writes go through the f-curves rather than ``keyframe_insert`` per bone per
@@ -293,27 +343,37 @@ def _apply_window(curves, names, root_name, msg, scene_start_frame: int,
     if not rows:
         return start
 
-    joints = len(names)
-    quats = [[ardy_steer.ardy_axis_angle_to_blender_quat(row[j * 3:j * 3 + 3])
-              for row in rows] for j in range(joints)]
-
+    # ARDY's local rotation, rebased into each bone's own rest frame. Skipping
+    # this is what made the rig draw as a hedgehog.
     for j, name in enumerate(names):
+        correction = corrections[name]
+        quats = []
+        for row in rows:
+            raw = ardy_steer.ardy_axis_angle_to_blender_quat(row[j * 3:j * 3 + 3])
+            quats.append(correction @ mathutils.Quaternion(raw))
+
         path = f'pose.bones["{name}"].rotation_quaternion'
         for axis in range(4):
             fc = curves.get((path, axis))
             if fc is not None:
-                _write_channel(fc, start, [q[axis] for q in quats[j]])
+                _write_channel(fc, start, [q[axis] for q in quats])
 
-    # A pose bone's location is an offset from its rest head, not a world
-    # position — feeding ARDY's absolute root straight in would lift the whole
-    # character by the height of its own rest hips.
+    # A pose bone's location is an offset from its rest head expressed in *bone
+    # space*, not a world position: feeding ARDY's absolute root straight in
+    # would both lift the character by its own rest hip height and translate it
+    # along the bone's axes rather than the world's.
     root_path = f'pose.bones["{root_name}"].location'
-    positions = [ardy_steer.ardy_to_blender_pos(p) for p in roots]
+    locations = []
+    for p in roots:
+        world = ardy_steer.ardy_to_blender_pos(p)
+        delta = mathutils.Vector((world[0] - root_rest[0],
+                                  world[1] - root_rest[1],
+                                  world[2] - root_rest[2]))
+        locations.append(root_rot_inv @ delta)
     for axis in range(3):
         fc = curves.get((root_path, axis))
         if fc is not None:
-            _write_channel(fc, start,
-                           [p[axis] - root_rest[axis] for p in positions])
+            _write_channel(fc, start, [loc[axis] for loc in locations])
 
     return start + len(rows)
 
@@ -378,7 +438,8 @@ class KIMODO_OT_ArdyStream(Operator):
 
         start_frame = context.scene.frame_current
         try:
-            arm, names, root_idx, root_rest = _build_armature(context, result)
+            (arm, names, root_idx, root_rest,
+             corrections, root_rot_inv) = _build_armature(context, result)
             root_name = names[root_idx] if root_idx < len(names) else names[0]
             self._action, self._curves = _prepare_action(
                 arm, names, root_name, start_frame)
@@ -391,9 +452,13 @@ class KIMODO_OT_ArdyStream(Operator):
         self._names = names
         self._root_name = root_name
         self._root_rest = root_rest
+        self._corrections = corrections
+        self._root_rot_inv = root_rot_inv
         self._start_frame = start_frame
         self._generated_until = self._start_frame     # exclusive
         self._last_prompt = s.prompt
+        # Far enough back that the first tick always plans.
+        self._last_plan_frame = start_frame - 10 ** 6
 
         s.source_armature = arm
         s.is_streaming = True
@@ -429,6 +494,7 @@ class KIMODO_OT_ArdyStream(Operator):
                 self._generated_until = _apply_window(
                     self._curves, self._names, self._root_name,
                     _state["result"], self._start_frame, self._root_rest,
+                    self._corrections, self._root_rot_inv,
                 )
             except Exception as exc:
                 return self._finish(context, f"Could not apply frames: {exc}")
@@ -440,35 +506,50 @@ class KIMODO_OT_ArdyStream(Operator):
         return {'RUNNING_MODAL'}
 
     def _pump(self, context, s):
-        """Start the next step when the buffer is running low."""
+        """Start the next step when the plan is stale or the buffer is low."""
         playhead = context.scene.frame_current
         ahead = self._generated_until - playhead
 
         # Backpressure: the GPU is behind the playhead. Pausing is the only
         # honest option — letting playback run into un-keyframed frames would
         # freeze the character mid-stride and look like a bug.
+        resume_at = min(self._horizon, max(1, s.ardy_stream_lead_frames // 2))
         if ahead <= 0 and context.screen.is_animation_playing:
             bpy.ops.screen.animation_cancel(restore_frame=False)
             s.stream_status = "Waiting for ARDY…"
-        elif (s.ardy_stream_autoplay and ahead > self._horizon
+        elif (s.ardy_stream_autoplay and ahead > resume_at
                 and not context.screen.is_animation_playing and s.is_streaming):
             bpy.ops.screen.animation_play()
 
         if _state["running"]:
             return
-        if ahead >= s.ardy_stream_lead_frames:
+
+        # Two reasons to step, and the first is what makes following work.
+        #
+        # A step regenerates a whole horizon against the target's position at
+        # that instant, so waiting for the buffer to drain before stepping
+        # again meant the target was only re-read once per horizon — the
+        # character committed to a two-second plan and ignored the empty until
+        # it ran out. Re-planning on an interval decouples "how often do we
+        # look at the target" from "how much motion is buffered".
+        since = playhead - self._last_plan_frame
+        stale = since >= max(1, s.ardy_stream_replan_interval)
+        starving = ahead < s.ardy_stream_lead_frames
+        if not (stale or starving):
             s.stream_status = self._status_line(ahead)
             return
 
         target_xz, heading = self._target(context, s)
         prompt = s.prompt if s.prompt != self._last_prompt else None
         self._last_prompt = s.prompt
+        self._last_plan_frame = playhead
 
         _state["running"] = True
         self._thread = threading.Thread(
             target=_worker,
             args=(max(0, playhead - self._start_frame), target_xz, heading,
-                  prompt, 120.0),
+                  prompt, s.ardy_stream_replan_buffer, s.ardy_stream_max_speed,
+                  120.0),
             daemon=True,
         )
         self._thread.start()

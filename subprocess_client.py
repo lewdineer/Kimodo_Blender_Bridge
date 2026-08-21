@@ -579,6 +579,8 @@ def stream_step(
     target_xz: "list[float] | None" = None,
     target_heading: "float | None" = None,
     prompt: "str | None" = None,
+    replan_buffer: "int | None" = None,
+    max_speed: "float | None" = None,
     timeout: float = 120.0,
 ) -> "tuple[bool, dict | str]":
     """Advance the stream one window. Returns (True, frames message).
@@ -589,12 +591,16 @@ def stream_step(
     if not is_running():
         return False, "ARDY is not running."
 
+    # replan_buffer and max_speed are re-sent every step so their sliders stay
+    # live during a stream, rather than being frozen at stream_begin.
     req = {
         "cmd": "stream_step",
         "frame_idx": int(frame_idx),
         "target_xz": target_xz,
         "target_heading": target_heading,
         "prompt": prompt,
+        "replan_buffer": replan_buffer,
+        "max_speed": max_speed,
     }
     err = _begin_request(req)
     if err:

@@ -404,6 +404,14 @@ class KIMODO_SceneSettings(PropertyGroup):
                     "play gets rewritten under you, which shows up as popping",
         default=8, min=0, max=120,
     )
+    ardy_stream_replan_interval: IntProperty(
+        name="Re-plan Every",
+        description="Frames of playback between re-plans. This is what decides "
+                    "how often the target's position is re-read: lower follows "
+                    "a moving target more closely, at the cost of more GPU work. "
+                    "It cannot go faster than the GPU finishes a window",
+        default=4, min=1, max=120,
+    )
     ardy_stream_lead_frames: IntProperty(
         name="Buffer Frames",
         description="How far ahead of the playhead to keep generating. Raise "

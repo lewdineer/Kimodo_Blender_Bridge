@@ -742,6 +742,13 @@ class KIMODO_PT_LiveStream(KIMODO_PanelBase, Panel):
             col.scale_y = 1.6
             col.operator("kimodo.ardy_stream_stop", text="⏹  Stop Stream", icon='X')
             layout.separator(factor=0.5)
+            live = layout.column(align=True)
+            live.label(text="Live — takes effect on the next re-plan:")
+            live.prop(s, "ardy_stream_replan_interval")
+            live.prop(s, "ardy_stream_replan_buffer")
+            live.prop(s, "ardy_stream_max_speed")
+            live.prop(s, "ardy_stream_lead_frames")
+            layout.separator(factor=0.5)
             layout.label(text="Move the target and the motion re-plans to follow.",
                          icon='INFO')
             layout.label(text="Esc also stops the stream.", icon='BLANK1')
@@ -760,6 +767,7 @@ class KIMODO_PT_LiveStream(KIMODO_PanelBase, Panel):
         col = layout.column(align=True)
         col.prop(s, "ardy_stream_diffusion_steps")
         col.prop(s, "ardy_stream_max_speed")
+        col.prop(s, "ardy_stream_replan_interval")
         col.prop(s, "ardy_stream_replan_buffer")
         col.prop(s, "ardy_stream_lead_frames")
         layout.prop(s, "ardy_stream_autoplay")

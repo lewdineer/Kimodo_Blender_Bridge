@@ -251,6 +251,17 @@ read_until("frames", "error")
 check(events("ar_step")[-1]["constrained"] is False,
       "no follow target means no root conditioning")
 
+# Sliders are re-sent every step so they are live during a stream: a smaller
+# commit buffer must move the replan point on the very next step.
+send({"cmd": "stream_step", "frame_idx": 40, "replan_buffer": 0})
+tight = read_until("frames", "error")[-1]
+check(tight["start_index"] == 41,
+      f"a per-step replan_buffer takes effect immediately (got {tight['start_index']})")
+send({"cmd": "stream_step", "frame_idx": 40, "replan_buffer": 12})
+loose = read_until("frames", "error")[-1]
+check(loose["start_index"] == 53,
+      f"and a larger one moves it back out (got {loose['start_index']})")
+
 send({"cmd": "stream_end"})
 check(read_until("stream_closed", "error")[-1]["status"] == "stream_closed",
       "stream closes")
