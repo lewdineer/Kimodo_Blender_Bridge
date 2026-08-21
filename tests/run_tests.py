@@ -26,6 +26,7 @@ MODULES = [
     "test_ardy_bridge",
     "test_addon_registration",
     "test_ardy_setup",
+    "test_action_fcurves",
     "test_armature_reuse",
     "test_panels",
 ]

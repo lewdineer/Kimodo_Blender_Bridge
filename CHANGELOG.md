@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.2] — 2026-08-21
+
+### Fixed
+
+- **Live Stream would not start on Blender 5.x**: `Could not build the stream armature: 'Action' object has no attribute 'fcurves'`. Blender 4.4 introduced slotted Actions and kept `Action.fcurves` working as a compatibility shim; 5.0 removed it, and the curves now live one level down and per slot — `action.layers[] → .strips[] → .channelbag(slot) → .fcurves`. The stream writes keyframes through F-curves directly (per-key `keyframe_insert` cannot keep up with playback), so it failed before a single frame was generated. The lookup now handles all three layouts, and the action's slot is bound *before* the curves are collected, so on 5.x the right channelbag is indexed rather than whichever one happened to be first.
+- **Scaffolding keyframes no longer empty every curve**: the F-curves are created by inserting one throwaway key per channel, which used to be deleted immediately — leaving every curve keyless, which Blender may garbage-collect, invalidating the references the stream then writes through. The throwaway keys are now placed on the stream's start frame instead, where the first generated window overwrites them as part of its normal truncation.
+
 ## [1.7.1] — 2026-08-21
 
 ### Fixed

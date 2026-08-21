@@ -165,41 +165,90 @@ def _build_armature(context, rest: dict):
     return arm_obj, names, root_idx, rest_pos[root_idx]
 
 
-def _prepare_action(arm_obj, names, root_name):
+def action_fcurves(action, slot=None):
+    """The F-curve collection of an Action, across Blender's three layouts.
+
+    Blender 4.4 introduced slotted Actions and kept ``Action.fcurves`` as a
+    shim; 5.0 removed it outright, and reading it there raises
+    ``'Action' object has no attribute 'fcurves'``. On 5.x the curves live one
+    level down, per slot:
+
+        action.layers[] -> .strips[] -> .channelbag(slot) -> .fcurves
+
+    Returns None when the action has no curve container yet, so callers can
+    tell "no curves" apart from "wrong Blender version".
+    """
+    legacy = getattr(action, "fcurves", None)
+    if legacy is not None:                      # <= 4.3, and 4.4's shim
+        return legacy
+
+    for layer in getattr(action, "layers", ()):
+        for strip in getattr(layer, "strips", ()):
+            bag = None
+            getter = getattr(strip, "channelbag", None)
+            if getter is not None and slot is not None:
+                try:
+                    bag = getter(slot, ensure=True)
+                except TypeError:               # older signature, no ensure=
+                    bag = getter(slot)
+                except Exception:
+                    bag = None
+            if bag is None:
+                bags = getattr(strip, "channelbags", None)
+                if bags:
+                    bag = bags[0]
+            if bag is not None:
+                return bag.fcurves
+    return None
+
+
+def _prepare_action(arm_obj, names, root_name, scaffold_frame: int):
     """Give every animated channel an f-curve, and return them indexed.
 
     Blender is left to create the action, its slot and the curves via one
-    ``keyframe_insert`` per channel: the 4.4+ slotted-Action API differs enough
-    between versions that letting Blender do the setup is far more robust than
-    building layers by hand. After this, writes go straight to the curves.
+    ``keyframe_insert`` per channel: the slotted-Action layout differs enough
+    between 4.3, 4.4 and 5.x that letting Blender do the setup is far more
+    robust than building layers by hand. After this, writes go straight to the
+    curves.
+
+    The scaffolding keys go on *scaffold_frame* — the frame the stream starts
+    at — rather than being deleted here. Emptying every curve risks Blender
+    collecting the now-keyless F-curves, which would leave the returned dict
+    holding dangling references; instead the first window's own truncation
+    overwrites them, since it starts at exactly this frame.
     """
     arm_obj.animation_data_create()
     for name in names:
         pb = arm_obj.pose.bones[name]
         pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
-        pb.keyframe_insert(data_path="rotation_quaternion", frame=0)
+        pb.keyframe_insert(data_path="rotation_quaternion", frame=scaffold_frame)
     root = arm_obj.pose.bones[root_name]
     root.location = (0.0, 0.0, 0.0)
-    root.keyframe_insert(data_path="location", frame=0)
+    root.keyframe_insert(data_path="location", frame=scaffold_frame)
 
     action = arm_obj.animation_data.action
-    curves = {}
-    for fc in action.fcurves:
-        curves[(fc.data_path, fc.array_index)] = fc
 
-    # Frame 0 was only ever scaffolding to force the curves into existence.
-    for fc in curves.values():
-        for kp in list(fc.keyframe_points):
-            if kp.co[0] == 0:
-                fc.keyframe_points.remove(kp, fast=True)
-        fc.update()
-
+    # Bind before collecting: on 5.x the curves are looked up per slot, so the
+    # slot has to be settled first or we would index the wrong channelbag.
     try:
         from .operators import _bind_action_with_slot
         _bind_action_with_slot(arm_obj, action)
     except Exception:
         # Pre-4.4 Blender has no slots; the plain assignment already stands.
         pass
+
+    slot = getattr(arm_obj.animation_data, "action_slot", None)
+    fcurves = action_fcurves(action, slot)
+    if fcurves is None:
+        raise RuntimeError(
+            "Blender created no F-curves for the stream armature "
+            f"(Action {action.name!r}). This is a Blender-version difference in "
+            "how Actions store curves — please report the Blender version."
+        )
+
+    curves = {}
+    for fc in fcurves:
+        curves[(fc.data_path, fc.array_index)] = fc
 
     return action, curves
 
@@ -327,10 +376,12 @@ class KIMODO_OT_ArdyStream(Operator):
         self._fps = float(result.get("fps", 20.0))
         self._horizon = int(result.get("gen_horizon_len", 8))
 
+        start_frame = context.scene.frame_current
         try:
             arm, names, root_idx, root_rest = _build_armature(context, result)
             root_name = names[root_idx] if root_idx < len(names) else names[0]
-            self._action, self._curves = _prepare_action(arm, names, root_name)
+            self._action, self._curves = _prepare_action(
+                arm, names, root_name, start_frame)
         except Exception as exc:
             sc.stream_end()
             self.report({'ERROR'}, f"Could not build the stream armature: {exc}")
@@ -340,7 +391,7 @@ class KIMODO_OT_ArdyStream(Operator):
         self._names = names
         self._root_name = root_name
         self._root_rest = root_rest
-        self._start_frame = context.scene.frame_current
+        self._start_frame = start_frame
         self._generated_until = self._start_frame     # exclusive
         self._last_prompt = s.prompt
 
