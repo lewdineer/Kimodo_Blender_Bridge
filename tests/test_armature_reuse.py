@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _harness import Checker, PACKAGE, load_addon
 
 load_addon()
+import bpy                                                  # noqa: E402
 O = sys.modules[PACKAGE + ".operators"]
 
 check = Checker("operators: armature reuse is skeleton-safe")
@@ -103,6 +104,51 @@ check(O._skeleton_signature(FakeObject("a", SOMA))
 check(O._skeleton_signature(FakeObject("a", SOMA))
       == O._skeleton_signature(FakeObject("b", list(reversed(SOMA)))),
       "signature ignores bone order")
+
+
+# --- the stream armature is reused, not rebuilt -----------------------------
+# Anything the user constrains to the stream armature — a camera with Child Of,
+# a retarget setup — holds a reference to the *object*. Deleting and recreating
+# it on every stream start empties those constraints with no error at all, so
+# the object survives whenever the skeleton is unchanged.
+ST = sys.modules[PACKAGE + ".ardy_stream"]
+
+CORE27 = ["Hips", "Spine", "Spine1", "LeftUpLeg", "LeftLeg", "LeftFoot"]
+
+
+class _ArmObj(FakeObject):
+    def __init__(self, name, bones):
+        super().__init__(name, bones)
+        self.users_collection = [object()]
+
+
+_saved_objects = list(bpy.data.objects)
+try:
+    bpy.data.objects.clear()
+    check(ST._reusable_armature(CORE27) is None,
+          "nothing to reuse when no stream armature exists")
+
+    same = _ArmObj(ST.STREAM_ARMATURE_NAME, CORE27)
+    bpy.data.objects.append(same)
+    check(ST._reusable_armature(CORE27) is same,
+          "an existing armature with the same skeleton is reused")
+    check(ST._reusable_armature(list(reversed(CORE27))) is same,
+          "  bone order does not matter")
+
+    check(ST._reusable_armature(CORE27 + ["Extra"]) is None,
+          "a different skeleton is not reused — the bones would not line up")
+    check(ST._reusable_armature(CORE27[:-1]) is None,
+          "  nor is one missing a bone")
+
+    mesh = _ArmObj(ST.STREAM_ARMATURE_NAME, [])
+    mesh.type = 'MESH'
+    bpy.data.objects.clear()
+    bpy.data.objects.append(mesh)
+    check(ST._reusable_armature(CORE27) is None,
+          "an unrelated object of the same name is not mistaken for the rig")
+finally:
+    bpy.data.objects.clear()
+    bpy.data.objects.extend(_saved_objects)
 
 
 def run():

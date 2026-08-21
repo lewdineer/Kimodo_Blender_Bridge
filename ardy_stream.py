@@ -124,32 +124,47 @@ def _build_armature(context, rest: dict):
         if parent >= 0 and parent not in first_child:
             first_child[parent] = i
 
-    existing = bpy.data.objects.get(STREAM_ARMATURE_NAME)
-    if existing is not None and existing.type == 'ARMATURE':
-        bpy.data.objects.remove(existing, do_unlink=True)
-
-    arm_data = bpy.data.armatures.new(STREAM_ARMATURE_NAME)
-    arm_obj = bpy.data.objects.new(STREAM_ARMATURE_NAME, arm_data)
-    context.scene.collection.objects.link(arm_obj)
-
-    # Whatever the user was doing (posing another rig, editing a mesh), edit
-    # bones can only be added from object mode on this armature.
+    # Whatever the user was doing (posing another rig, editing a mesh), the
+    # work below needs object mode.
     if context.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
-    context.view_layer.objects.active = arm_obj
-    arm_obj.select_set(True)
-    bpy.ops.object.mode_set(mode='EDIT')
-    try:
-        for i, name in enumerate(names):
-            bone = arm_data.edit_bones.new(name)
-            bone.head = rest_pos[i]
-            bone.tail = _rest_tail(rest_pos, parents, first_child, i)
-            bone.roll = 0.0
-        for i, name in enumerate(names):
-            if parents[i] >= 0:
-                arm_data.edit_bones[name].parent = arm_data.edit_bones[names[parents[i]]]
-    finally:
-        bpy.ops.object.mode_set(mode='OBJECT')
+
+    arm_obj = _reusable_armature(names)
+    if arm_obj is not None:
+        # Same skeleton as last time, so keep the object itself and replace
+        # only its animation. Rebuilding it would silently break anything
+        # pointing at it — a camera with a Child Of, a retarget setup — since
+        # a deleted target leaves the constraint with nothing to follow.
+        _clear_animation(arm_obj)
+        arm_data = arm_obj.data
+        if not arm_obj.users_collection:
+            context.scene.collection.objects.link(arm_obj)
+        context.view_layer.objects.active = arm_obj
+        arm_obj.select_set(True)
+    else:
+        stale = bpy.data.objects.get(STREAM_ARMATURE_NAME)
+        if stale is not None and stale.type == 'ARMATURE':
+            bpy.data.objects.remove(stale, do_unlink=True)
+
+        arm_data = bpy.data.armatures.new(STREAM_ARMATURE_NAME)
+        arm_obj = bpy.data.objects.new(STREAM_ARMATURE_NAME, arm_data)
+        context.scene.collection.objects.link(arm_obj)
+
+        context.view_layer.objects.active = arm_obj
+        arm_obj.select_set(True)
+        bpy.ops.object.mode_set(mode='EDIT')
+        try:
+            for i, name in enumerate(names):
+                bone = arm_data.edit_bones.new(name)
+                bone.head = rest_pos[i]
+                bone.tail = _rest_tail(rest_pos, parents, first_child, i)
+                bone.roll = 0.0
+            for i, name in enumerate(names):
+                if parents[i] >= 0:
+                    arm_data.edit_bones[name].parent = \
+                        arm_data.edit_bones[names[parents[i]]]
+        finally:
+            bpy.ops.object.mode_set(mode='OBJECT')
 
     for pb in arm_obj.pose.bones:
         pb.rotation_mode = 'QUATERNION'
@@ -174,6 +189,32 @@ def _build_armature(context, rest: dict):
     root_rot_inv = ardy_steer.quat_inverse(rest_rots[names[root_idx]])
 
     return arm_obj, names, root_idx, rest_pos[root_idx], rest_rots, root_rot_inv
+
+
+def _reusable_armature(names):
+    """An existing stream armature with exactly this skeleton, or None.
+
+    Reuse matters because other objects point at this one. A camera parented
+    to it with Child Of, or a rig retargeted from it, keeps a reference to the
+    *object*; deleting and recreating it on every stream start leaves those
+    constraints with an empty target and no warning.
+    """
+    obj = bpy.data.objects.get(STREAM_ARMATURE_NAME)
+    if obj is None or obj.type != 'ARMATURE':
+        return None
+    if {b.name for b in obj.data.bones} != set(names):
+        return None       # a different skeleton — the bones would not line up
+    return obj
+
+
+def _clear_animation(arm_obj):
+    """Drop the previous stream's action, leaving the object itself intact."""
+    ad = arm_obj.animation_data
+    old_action = ad.action if ad else None
+    if ad:
+        arm_obj.animation_data_clear()
+    if old_action is not None and old_action.users == 0:
+        bpy.data.actions.remove(old_action)
 
 
 def _rest_tail(rest_pos, parents, first_child, i):
@@ -511,6 +552,15 @@ class KIMODO_OT_ArdyStream(Operator):
                 return self._finish(context, f"Could not apply frames: {exc}")
             if context.scene.frame_end < self._generated_until:
                 context.scene.frame_end = self._generated_until
+
+            # Writing f-curves directly does not tell Blender anything changed,
+            # and tag_redraw only repaints — it does not re-evaluate. Without
+            # this, objects constrained to the armature (a camera with Child
+            # Of, a retargeted rig) keep showing the pose from before the last
+            # window, which is most obvious while backpressure has playback
+            # paused and no frame change is forcing an update.
+            self._arm.update_tag()
+            context.view_layer.update()
 
         self._pump(context, s)
         self._redraw(context)

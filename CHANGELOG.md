@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.1] — 2026-08-21
+
+### Fixed
+
+- **Constraints pointing at the stream armature broke on every restart**: starting a stream deleted and recreated the `ARDY_Stream` object, so a camera parented to it with *Child Of* — or anything else constrained to it — was left with an empty target and no error to explain it. The object is now reused whenever the skeleton is unchanged, and only its animation is replaced; it is rebuilt from scratch only when the bone set genuinely differs.
+- **Objects following the armature lagged a window behind**: streamed frames are written straight into the f-curves, which is the only way to keep up with playback, but that tells Blender nothing has changed — and the panel's redraw only repaints, it does not re-evaluate. Anything depending on the armature therefore kept showing the pose from before the last window. Most visible while backpressure had playback paused, since no frame change was forcing an update either. Each applied window now tags the armature and updates the view layer.
+
 ## [1.8.0] — 2026-08-21
 
 ### Added

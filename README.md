@@ -183,6 +183,8 @@ Why this only exists for ARDY: it is autoregressive, generating one short window
 
 **If the character reacts sluggishly** to the target, lower **Re-plan Every** (how often the target is re-read) or **Commit Frames** (how much of the near future is locked in and cannot be re-planned).
 
+**Attaching a camera**: add a *Child Of* constraint to your camera, target `ARDY_Stream`, pick a bone (`Hips` follows the body, `Head` gives a first-person feel), then click **Set Inverse** to lock in the current offset. The armature object survives across streams, so the constraint keeps working when you start a new one — as long as the skeleton has not changed.
+
 **Driving with the keyboard**: set **Control** to *Arrow Keys* instead of *Follow Object*. `↑` / `↓` change speed, `←` / `→` turn. The velocity persists between presses — one tap and the character keeps walking until you slow it back down. While a stream is running the arrow keys are captured, so they will not step frames; that goes back to normal when you stop.
 
 ### Retarget to your own rig
