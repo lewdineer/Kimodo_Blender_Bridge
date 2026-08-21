@@ -27,7 +27,6 @@ import threading
 import time
 
 import bpy
-import mathutils
 from bpy.types import Operator
 
 from . import subprocess_client as sc
@@ -97,8 +96,9 @@ def _build_armature(context, rest: dict):
     from Blender rather than from the offsets keeps it self-consistent with
     whatever Blender actually built.
 
-    Returns the correction quaternion per bone alongside the armature; see
-    ``_apply_window`` for how it is applied.
+    Returns each bone's rest rotation alongside the armature; see
+    ``ardy_steer.rebase_local_rotation`` for how a joint rotation is mapped
+    through it.
     """
     names = rest["bone_names"]
     parents = rest["parents"]
@@ -150,23 +150,14 @@ def _build_armature(context, rest: dict):
     for pb in arm_obj.pose.bones:
         pb.rotation_mode = 'QUATERNION'
 
-    # Rebasing terms, read back from what Blender actually built.
-    #
-    # Blender composes a pose as
-    #     pose_i = pose_parent @ (RL_parent^-1 @ RL_i) @ basis_i
-    # while ARDY's FK is  G_i = G_parent @ R_i.  Equating the rotations gives
-    #     basis_i = RL_i^-1 @ RL_parent @ R_i
-    # which is identity only when every rest orientation is identity — the
-    # earlier all-bones-point-+Y rig, which posed correctly but drew as a
-    # hedgehog because each bone's shape pointed wherever +Y was rotated to.
-    corrections = {}
-    identity = mathutils.Quaternion()
-    for i, name in enumerate(names):
-        rl = arm_data.bones[name].matrix_local.to_quaternion()
-        parent = parents[i]
-        rl_parent = (arm_data.bones[names[parent]].matrix_local.to_quaternion()
-                     if parent >= 0 else identity)
-        corrections[name] = rl.inverted() @ rl_parent
+    # Each bone's rest rotation, read back from what Blender actually built.
+    # ardy_steer.rebase_local_rotation turns an ARDY joint rotation into the
+    # pose basis for a bone with this rest orientation; see its docstring for
+    # the derivation.
+    rest_rots = {}
+    for name in names:
+        q = arm_data.bones[name].matrix_local.to_quaternion()
+        rest_rots[name] = (q.w, q.x, q.y, q.z)
 
     # Tag it the way the rest of the add-on recognises a source rig, so the
     # Retarget panel accepts the result without any special-casing.
@@ -176,10 +167,9 @@ def _build_armature(context, rest: dict):
 
     # The root's own rest rotation, needed to express its world translation as
     # a bone-space location (pose_bone.location lives in bone space, not world).
-    root_name = names[root_idx]
-    root_rot_inv = arm_data.bones[root_name].matrix_local.to_quaternion().inverted()
+    root_rot_inv = ardy_steer.quat_inverse(rest_rots[names[root_idx]])
 
-    return arm_obj, names, root_idx, rest_pos[root_idx], corrections, root_rot_inv
+    return arm_obj, names, root_idx, rest_pos[root_idx], rest_rots, root_rot_inv
 
 
 def _rest_tail(rest_pos, parents, first_child, i):
@@ -329,7 +319,7 @@ def _write_channel(fcurve, start_frame: int, values):
 
 
 def _apply_window(curves, names, root_name, msg, scene_start_frame: int,
-                  root_rest, corrections, root_rot_inv):
+                  root_rest, rest_rots, root_rot_inv):
     """Keyframe one window of frames onto the armature.
 
     Writes go through the f-curves rather than ``keyframe_insert`` per bone per
@@ -343,14 +333,13 @@ def _apply_window(curves, names, root_name, msg, scene_start_frame: int,
     if not rows:
         return start
 
-    # ARDY's local rotation, rebased into each bone's own rest frame. Skipping
-    # this is what made the rig draw as a hedgehog.
+    # ARDY's local rotation, rebased into each bone's own rest frame.
     for j, name in enumerate(names):
-        correction = corrections[name]
+        rest_rot = rest_rots[name]
         quats = []
         for row in rows:
             raw = ardy_steer.ardy_axis_angle_to_blender_quat(row[j * 3:j * 3 + 3])
-            quats.append(correction @ mathutils.Quaternion(raw))
+            quats.append(ardy_steer.rebase_local_rotation(rest_rot, raw))
 
         path = f'pose.bones["{name}"].rotation_quaternion'
         for axis in range(4):
@@ -366,10 +355,10 @@ def _apply_window(curves, names, root_name, msg, scene_start_frame: int,
     locations = []
     for p in roots:
         world = ardy_steer.ardy_to_blender_pos(p)
-        delta = mathutils.Vector((world[0] - root_rest[0],
-                                  world[1] - root_rest[1],
-                                  world[2] - root_rest[2]))
-        locations.append(root_rot_inv @ delta)
+        delta = (world[0] - root_rest[0],
+                 world[1] - root_rest[1],
+                 world[2] - root_rest[2])
+        locations.append(ardy_steer.quat_rotate_vec(root_rot_inv, delta))
     for axis in range(3):
         fc = curves.get((root_path, axis))
         if fc is not None:
@@ -439,7 +428,7 @@ class KIMODO_OT_ArdyStream(Operator):
         start_frame = context.scene.frame_current
         try:
             (arm, names, root_idx, root_rest,
-             corrections, root_rot_inv) = _build_armature(context, result)
+             rest_rots, root_rot_inv) = _build_armature(context, result)
             root_name = names[root_idx] if root_idx < len(names) else names[0]
             self._action, self._curves = _prepare_action(
                 arm, names, root_name, start_frame)
@@ -452,7 +441,7 @@ class KIMODO_OT_ArdyStream(Operator):
         self._names = names
         self._root_name = root_name
         self._root_rest = root_rest
-        self._corrections = corrections
+        self._rest_rots = rest_rots
         self._root_rot_inv = root_rot_inv
         self._start_frame = start_frame
         self._generated_until = self._start_frame     # exclusive
@@ -494,7 +483,7 @@ class KIMODO_OT_ArdyStream(Operator):
                 self._generated_until = _apply_window(
                     self._curves, self._names, self._root_name,
                     _state["result"], self._start_frame, self._root_rest,
-                    self._corrections, self._root_rot_inv,
+                    self._rest_rots, self._root_rot_inv,
                 )
             except Exception as exc:
                 return self._finish(context, f"Could not apply frames: {exc}")

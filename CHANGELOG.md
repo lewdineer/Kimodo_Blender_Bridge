@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.5] — 2026-08-21
+
+### Fixed
+
+- **The streamed rig animated into a scrambled mess** (1.7.4 regression): 1.7.4 gave the stream armature a proper T-pose rest, which meant ARDY's joint rotations needed rebasing into each bone's rest frame — and the formula was wrong. It used `B = RL⁻¹ · RL_parent · R`, which makes a posed bone's axes equal the joint's global rotation instead of the rest axes *turned by* it, leaving every bone off by its own rest orientation. The correct term drops the parent entirely: `B = RL⁻¹ · R · RL`, a conjugation by the bone's own rest rotation. This failure mode is nasty because the *rest* pose comes out right under either formula — only the animation is wrong — so it cannot be spotted without posing the rig.
+- **The rebasing maths is now covered by tests**: it moved out of the Blender-only module into `ardy_steer.py` as plain quaternion functions, and `tests/test_ardy_steer.py` simulates Blender's own pose composition (`P_i = P_parent · RL_parent⁻¹ · RL_i · B_i`) over a three-bone chain with deliberately awkward rest orientations, requiring that it reproduces ARDY's forward kinematics. The suite also pins that a correct rest pose proves nothing, since that was what let the bad formula ship.
+
 ## [1.7.4] — 2026-08-21
 
 ### Fixed

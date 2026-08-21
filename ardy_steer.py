@@ -142,6 +142,71 @@ def ardy_axis_angle_to_blender_quat(aa):
     return (math.cos(half), bx * s, by * s, bz * s)
 
 
+# ---------------------------------------------------------------------------
+# Quaternions, and rebasing a joint rotation onto a Blender bone
+# ---------------------------------------------------------------------------
+#
+# Quaternions are plain (w, x, y, z) tuples so this stays testable outside
+# Blender; the volume is small (joints x window, a few thousand multiplies a
+# second) so pure Python costs nothing that matters.
+
+def quat_mul(a, b):
+    """Compose two rotations: apply *b*, then *a*."""
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
+def quat_inverse(q):
+    """Inverse of a unit quaternion — its conjugate."""
+    w, x, y, z = q
+    return (w, -x, -y, -z)
+
+
+def quat_rotate_vec(q, v):
+    """Rotate a 3-vector by a unit quaternion."""
+    w, x, y, z = q
+    vx, vy, vz = v
+    # t = 2 * (q_vec x v); v' = v + w*t + q_vec x t
+    tx = 2.0 * (y * vz - z * vy)
+    ty = 2.0 * (z * vx - x * vz)
+    tz = 2.0 * (x * vy - y * vx)
+    return (
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx),
+    )
+
+
+def rebase_local_rotation(rest_rot, local_rot):
+    """ARDY's local joint rotation as a Blender pose-bone basis rotation.
+
+    Blender composes a pose as
+
+        P_i = P_parent . RL_parent^-1 . RL_i . B_i
+
+    and a bone's axes are its rest axes turned by the joint's global rotation,
+    so P_i = G_i . RL_i.  With ARDY's FK being G_i = G_parent . R_i, those
+    reduce to
+
+        B_i = RL_i^-1 . R_i . RL_i
+
+    — a conjugation by the bone's *own* rest rotation, with the parent's
+    dropping out entirely.  Getting this wrong (an earlier version used
+    RL_i^-1 . RL_parent . R_i) leaves every bone off by its own rest
+    orientation: the rest pose looks right and the animation is scrambled.
+
+    With an identity rest pose this collapses to B_i = R_i, which is why a rig
+    whose bones all point the same way needs no correction at all.
+    """
+    return quat_mul(quat_mul(quat_inverse(rest_rot), local_rot), rest_rot)
+
+
 def heading_from_waypoints(waypoints, fallback: float = 0.0):
     """Facing angle implied by the last meaningful step of a projected path.
 
