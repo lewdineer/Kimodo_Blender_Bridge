@@ -44,6 +44,19 @@ Blender (addon)                Kimodo venv
 
 The bridge server loads the Kimodo model once at startup and then responds to generation requests over stdin/stdout. Blender stays responsive while generation runs in a background thread.
 
+### Remote server
+
+If this machine has no NVIDIA GPU, set **Backend** to **Remote URL** in the Connection panel and point it at a [motionmcp-kimodo](https://github.com/animatica-ai/motionmcp-kimodo) server running on a CUDA machine. The addon sends `POST /generate` and imports the glTF the server returns. No local PyTorch install is required.
+
+On the GPU machine:
+
+```bash
+cd /path/to/motionmcp-kimodo
+.venv/bin/python run_server.py --host 0.0.0.0 --port 8766
+```
+
+Then set the URL to `http://<that-machine>:8766` and click **Connect**. Use a port that is not already taken (port 8000 is the server's own default, but it is often used by something else). `Connect` reads `/capabilities` and fails immediately if the URL is not an MMCP server.
+
 ---
 
 ## Requirements
@@ -52,7 +65,7 @@ The bridge server loads the Kimodo model once at startup and then responds to ge
 |---|---|
 | Blender 4.0+ | Tested on 5.1 (Windows & Arch Linux) |
 | Python 3.10–3.12 | System Python used to create the managed venv |
-| NVIDIA GPU | 8 GB+ VRAM recommended; 16 GB+ for best results |
+| NVIDIA GPU | Local backend only. 8 GB+ VRAM recommended. Remote URL uses a CUDA machine instead. |
 | CUDA | Must match your PyTorch build (CUDA 12.1 installed by default) |
 | ~10 GB disk | For the managed venv, model weights, and LLM2Vec encoder |
 
@@ -155,7 +168,7 @@ To add a constraint:
 
 | Panel | What's in it |
 |---|---|
-| **Connection** | Kimodo Python path, model selector, Start / Stop bridge |
+| **Connection** | Local Python path and Start / Stop, or a remote server URL |
 | **Generate** | Single Clip mode (one prompt, duration, seed) or Timeline mode (segment list, frame ranges) — one Generate Motion button either way |
 | **Motion Constraints** | Spatial waypoints for the generated motion |
 | **Retarget** | Bone mapping, Apply Constraints, Bake |
@@ -188,7 +201,8 @@ To add a constraint:
 |---|---|
 | `__init__.py` | Blender addon entry point |
 | `bridge_server.py` | Subprocess: loads Kimodo, handles generation requests |
-| `subprocess_client.py` | Blender-side bridge manager |
+| `subprocess_client.py` | Blender-side local bridge manager |
+| `remote_client.py` | HTTP client for a remote motionmcp-kimodo server |
 | `operators.py` | All `bpy.ops.kimodo.*` operators |
 | `properties.py` | All `bpy.props` scene settings |
 | `panels.py` | N-panel UI |

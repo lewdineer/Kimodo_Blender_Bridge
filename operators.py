@@ -15,6 +15,7 @@ from bpy.types import Operator
 from bpy.props import StringProperty, BoolProperty, IntProperty
 
 from . import subprocess_client as sc
+from . import remote_client as rc
 from . import retarget as rt
 from . import constraints as cmod
 from . import setup_operator as so
@@ -68,6 +69,92 @@ def _ensure_bvh_importer() -> bool:
     return _bvh_operator_registered()
 
 
+def _uses_remote(_s=None) -> bool:
+    from . import properties as props
+    return props.uses_remote()
+
+
+def _require_generator(operator, s) -> bool:
+    """Report and return False when motion cannot be generated yet."""
+    if _uses_remote(s):
+        if not (s.is_connected and rc.is_ready()):
+            operator.report(
+                {'WARNING'},
+                "Not connected — set the server URL and click Connect.",
+            )
+            return False
+        return True
+    if not sc.is_running():
+        operator.report(
+            {'WARNING'},
+            "Kimodo is not running — click 'Start Kimodo' first.",
+        )
+        return False
+    return True
+
+
+def _remote_generation_args(context, scene_start_override=None):
+    """
+    Constraint payload for a remote job, built on the main thread.
+    Returns (args, error). ``args`` is None when the backend is local.
+    ``error`` is set when constraints could not be built; generation still
+    proceeds without them, matching the local path.
+    """
+    s = context.scene.kimodo
+    if not _uses_remote(s):
+        return None, None
+    caps = rc.capabilities()
+    if not caps:
+        # Still a remote job: an empty payload makes the thread report the
+        # disconnect instead of falling through to the local bridge.
+        return {
+            "constraints": [],
+            "transition_frames": s.num_transition_frames,
+        }, "Not connected — set the server URL and click Connect."
+    model = caps["models"][0]
+    joints = [j["name"] for j in model["canonical_skeleton"]["joints"]]
+    root = next(
+        (j["name"] for j in model["canonical_skeleton"]["joints"] if not j.get("parent")),
+        "Hips",
+    )
+    constraints = []
+    err = None
+    enabled = [c for c in s.motion_constraints if c.enabled and c.marker_object]
+    if enabled:
+        try:
+            constraints = cmod.build_mmcp_constraints(
+                s.motion_constraints,
+                context.scene,
+                kimodo_fps=s.kimodo_fps,
+                auto_canonicalize=s.auto_canonicalize,
+                scene_start_override=scene_start_override,
+                skeleton_joints=joints,
+                root_joint=root,
+            )
+        except Exception as exc:
+            err = str(exc)
+    return {
+        "constraints": constraints,
+        "transition_frames": s.num_transition_frames,
+    }, err
+
+
+def _generate_remote(prompts, durations, seeds, remote_args, progress_cb):
+    """POST one MMCP generate and return (success, gltf_path_or_error)."""
+    try:
+        body = rc.build_generate_request(
+            rc.capabilities(),
+            prompts=list(prompts),
+            durations=list(durations),
+            seeds=list(seeds) if seeds is not None else None,
+            constraints=(remote_args or {}).get("constraints"),
+            transition_frames=(remote_args or {}).get("transition_frames", 5),
+        )
+    except rc.RemoteError as exc:
+        return False, str(exc)
+    return rc.generate_to_file(body, progress_callback=progress_cb)
+
+
 def _import_bvh(**kwargs):
     """Import a BVH file, self-healing a missing/disabled importer add-on.
 
@@ -89,6 +176,134 @@ def _import_bvh(**kwargs):
         raise RuntimeError(f"BVH import failed: {e}")
 
 
+def _is_gltf(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in (".gltf", ".glb")
+
+
+def _gltf_operator_registered() -> bool:
+    return hasattr(bpy.types, "IMPORT_SCENE_OT_gltf")
+
+
+def _ensure_gltf_importer() -> bool:
+    if _gltf_operator_registered():
+        return True
+    for module_name in ("io_scene_gltf2", "bl_ext.blender_org.io_scene_gltf2"):
+        try:
+            addon_utils.enable(module_name, default_set=True, persistent=True)
+        except Exception:
+            continue
+        if _gltf_operator_registered():
+            return True
+    return _gltf_operator_registered()
+
+
+def _iter_action_fcurves(action):
+    """Yield fcurves from legacy actions and from Blender 4.4+ layered actions."""
+    if action is None:
+        return
+    seen = set()
+
+    def _emit(curves):
+        for fc in curves or []:
+            ident = id(fc)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            yield fc
+
+    legacy = getattr(action, "fcurves", None)
+    if legacy:
+        yield from _emit(legacy)
+
+    for layer in getattr(action, "layers", None) or []:
+        for strip in getattr(layer, "strips", None) or []:
+            bags = getattr(strip, "channelbags", None)
+            if bags is not None:
+                try:
+                    bag_list = list(bags)
+                except TypeError:
+                    bag_list = []
+                for bag in bag_list:
+                    yield from _emit(getattr(bag, "fcurves", None))
+            channelbag = getattr(strip, "channelbag", None)
+            if not channelbag:
+                continue
+            for slot in getattr(action, "slots", None) or []:
+                try:
+                    bag = channelbag(slot)
+                except Exception:
+                    bag = None
+                if bag is not None:
+                    yield from _emit(getattr(bag, "fcurves", None))
+
+
+def _action_frame_range(action):
+    """(min, max) keyframe times, or (None, None) when the action has no keys."""
+    lo = hi = None
+    for fc in _iter_action_fcurves(action):
+        for kp in fc.keyframe_points:
+            x = kp.co.x
+            lo = x if lo is None else min(lo, x)
+            hi = x if hi is None else max(hi, x)
+    return lo, hi
+
+
+def _shift_action(action, delta: float) -> None:
+    if not delta:
+        return
+    for fc in _iter_action_fcurves(action):
+        for kp in fc.keyframe_points:
+            kp.co.x += delta
+            kp.handle_left.x += delta
+            kp.handle_right.x += delta
+        try:
+            fc.update()
+        except Exception:
+            pass
+
+
+def _place_gltf_animation(arm, start_frame: int, update_scene_duration: bool) -> None:
+    """Slide the imported clip so its first key sits on ``start_frame``.
+
+    glTF is Y-up metres. Blender's importer maps (x, y, z) to (x, -z, y),
+    the same facing as the BVH path (axis_forward='-Z', axis_up='Y'):
+    Kimodo +Z forward lands on Blender -Y, and +Y up lands on Blender +Z.
+    The file is already in metres, so unlike BVH it is not scaled by 0.01.
+    """
+    action = arm.animation_data.action if arm.animation_data else None
+    lo, hi = _action_frame_range(action)
+    if lo is None:
+        return
+    delta = float(start_frame) - lo
+    _shift_action(action, delta)
+    if update_scene_duration and hi is not None:
+        scene = bpy.context.scene
+        end = int(math.ceil(hi + delta))
+        if end > scene.frame_end:
+            scene.frame_end = end
+
+
+def _import_gltf(filepath: str, start_frame: int = 1, update_scene_duration: bool = True):
+    """Import a glTF/GLB motion file. Returns the new armature, or None."""
+    if not _ensure_gltf_importer():
+        raise RuntimeError(
+            "Blender's glTF importer is not available. Enable "
+            "'Import-Export: glTF 2.0 format' under Edit > Preferences > Add-ons."
+        )
+    before = set(bpy.data.objects)
+    try:
+        bpy.ops.import_scene.gltf(filepath=filepath)
+    except (AttributeError, RuntimeError) as exc:
+        raise RuntimeError(f"glTF import failed: {exc}") from exc
+    new_arm = next(
+        (obj for obj in set(bpy.data.objects) - before if obj.type == 'ARMATURE'),
+        None,
+    )
+    if new_arm is not None:
+        _place_gltf_animation(new_arm, start_frame, update_scene_duration)
+    return new_arm
+
+
 # ---------------------------------------------------------------------------
 # Shared async state (thread → modal operator communication)
 # ---------------------------------------------------------------------------
@@ -106,6 +321,16 @@ _generation_state = {
 def _reset_state():
     _generation_state.update(running=False, done=False, success=False,
                               cancelled=False, result="", progress="")
+
+
+def _discard_result_file():
+    """Delete a finished output the user asked to throw away."""
+    path = _generation_state.get("result") or ""
+    if isinstance(path, str) and path and os.path.isfile(path):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _step_seed_after_generation(owner, resolved_seed: int = None) -> None:
@@ -176,11 +401,18 @@ class KIMODO_OT_StartKimodo(Operator):
     _timer  = None
     _thread = None
 
-    def _run_start(self, python_exe: str, model_name: str, use_offload: bool):
+    def _run_start(self, python_exe: str, model_name: str, use_offload: bool,
+                   remote_url=None):
         def progress(msg):
             _start_state["message"] = msg
 
-        success, msg = sc.start(python_exe, model_name, use_offload=use_offload, progress_callback=progress)
+        if remote_url is not None:
+            success, msg = rc.connect(remote_url, progress_callback=progress)
+        else:
+            success, msg = sc.start(
+                python_exe, model_name, use_offload=use_offload,
+                progress_callback=progress,
+            )
         _start_state["success"] = success
         _start_state["message"] = msg
         _start_state["done"]    = True
@@ -189,20 +421,25 @@ class KIMODO_OT_StartKimodo(Operator):
     def invoke(self, context, event):
         s = context.scene.kimodo
 
-        if sc.is_running():
+        remote = _uses_remote(s)
+        if remote:
+            if s.is_connected and rc.is_ready():
+                self.report({'INFO'}, "Already connected to the Kimodo server.")
+                return {'CANCELLED'}
+        elif sc.is_running():
             self.report({'INFO'}, "Kimodo is already running.")
             return {'CANCELLED'}
 
         _reset_start_state()
         _start_state["running"] = True
         s.is_connected      = False
-        s.connection_status = "Starting…"
+        s.connection_status = "Connecting…" if remote else "Starting…"
 
         # Resolve the Python hint on the main thread. When the scene has no
         # explicit path, fall back to the remembered managed-venv location
         # (addon preference) so a fresh scene still finds the install.
         python_hint = (s.python_executable or "").strip()
-        if not python_hint:
+        if not python_hint and not remote:
             try:
                 python_hint = so.managed_python()
             except Exception:
@@ -211,6 +448,7 @@ class KIMODO_OT_StartKimodo(Operator):
         self._thread = threading.Thread(
             target=self._run_start,
             args=(python_hint, s.kimodo_model, s.use_offload),
+            kwargs={"remote_url": s.server_url if remote else None},
             daemon=True,
         )
         self._thread.start()
@@ -243,6 +481,12 @@ class KIMODO_OT_StartKimodo(Operator):
         if _start_state["success"]:
             s.is_connected      = True
             s.connection_status = _start_state["message"]
+            info = rc.session()
+            if _uses_remote(s) and info:
+                try:
+                    s.kimodo_fps = float(info["fps"])
+                except (TypeError, ValueError, KeyError):
+                    pass
             self.report({'INFO'}, f"Kimodo ready: {_start_state['message']}")
         else:
             s.is_connected      = False
@@ -261,11 +505,17 @@ class KIMODO_OT_StopKimodo(Operator):
     bl_label  = "Stop Kimodo"
 
     def execute(self, context):
-        sc.stop()
         s = context.scene.kimodo
+        remote = _uses_remote(s)
+        rc.disconnect()
+        if sc.is_running():
+            sc.stop()
         s.is_connected      = False
         s.connection_status = "Stopped"
-        self.report({'INFO'}, "Kimodo bridge stopped.")
+        if remote:
+            self.report({'INFO'}, "Disconnected from Kimodo server.")
+        else:
+            self.report({'INFO'}, "Kimodo bridge stopped.")
         return {'FINISHED'}
 
 
@@ -281,20 +531,26 @@ class KIMODO_OT_Generate(Operator):
     _timer = None
     _thread = None
 
-    def _run_generation(self, prompt, duration, seed, fmt, constraints_json=None, bvh_standard_tpose=False):
+    def _run_generation(self, prompt, duration, seed, fmt, constraints_json=None,
+                        bvh_standard_tpose=False, remote_args=None):
         """Runs in background thread."""
         def progress_cb(msg):
             _generation_state["progress"] = msg
 
-        success, result = sc.generate_motion(
-            prompt=prompt,
-            duration=duration,
-            seed=seed,
-            output_format=fmt,
-            constraints_json=constraints_json,
-            bvh_standard_tpose=bvh_standard_tpose,
-            progress_callback=progress_cb,
-        )
+        if remote_args is not None:
+            success, result = _generate_remote(
+                [prompt], [duration], [seed], remote_args, progress_cb,
+            )
+        else:
+            success, result = sc.generate_motion(
+                prompt=prompt,
+                duration=duration,
+                seed=seed,
+                output_format=fmt,
+                constraints_json=constraints_json,
+                bvh_standard_tpose=bvh_standard_tpose,
+                progress_callback=progress_cb,
+            )
         _generation_state["success"] = success
         _generation_state["result"] = result
         _generation_state["done"] = True
@@ -303,8 +559,7 @@ class KIMODO_OT_Generate(Operator):
     def invoke(self, context, event):
         s = context.scene.kimodo
 
-        if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+        if not _require_generator(self, s):
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating — please wait.")
@@ -321,21 +576,27 @@ class KIMODO_OT_Generate(Operator):
         s.is_generating = True
         s.generation_progress = "Starting…"
 
-        # Build constraints JSON if any are defined
+        # Build constraints on the main thread (they read the scene).
         constraints_json = None
-        enabled_constraints = [c for c in s.motion_constraints if c.enabled and c.marker_object]
-        if enabled_constraints:
-            try:
-                constraints_data = cmod.build_constraints_json(
-                    s.motion_constraints,
-                    context.scene,
-                    kimodo_fps=s.kimodo_fps,
-                    auto_canonicalize=s.auto_canonicalize,
-                )
-                constraints_json = json.dumps(constraints_data)
-                s.constraint_json_preview = constraints_json
-            except Exception as e:
-                self.report({'WARNING'}, f"Constraint build failed (generating without): {e}")
+        remote_args = None
+        if _uses_remote(s):
+            remote_args, con_err = _remote_generation_args(context)
+            if con_err:
+                self.report({'WARNING'}, f"Constraint build failed (generating without): {con_err}")
+        else:
+            enabled_constraints = [c for c in s.motion_constraints if c.enabled and c.marker_object]
+            if enabled_constraints:
+                try:
+                    constraints_data = cmod.build_constraints_json(
+                        s.motion_constraints,
+                        context.scene,
+                        kimodo_fps=s.kimodo_fps,
+                        auto_canonicalize=s.auto_canonicalize,
+                    )
+                    constraints_json = json.dumps(constraints_data)
+                    s.constraint_json_preview = constraints_json
+                except Exception as e:
+                    self.report({'WARNING'}, f"Constraint build failed (generating without): {e}")
 
         self._thread = threading.Thread(
             target=self._run_generation,
@@ -346,6 +607,7 @@ class KIMODO_OT_Generate(Operator):
                 s.output_format,
                 constraints_json,
                 s.bvh_standard_tpose,
+                remote_args,
             ),
             daemon=True,
         )
@@ -378,6 +640,7 @@ class KIMODO_OT_Generate(Operator):
         s.is_generating = False
 
         if _generation_state["cancelled"]:
+            _discard_result_file()
             s.generation_progress = "Cancelled"
             self.report({'INFO'}, "Generation cancelled — result discarded.")
         elif _generation_state["success"]:
@@ -386,14 +649,14 @@ class KIMODO_OT_Generate(Operator):
             s.generation_progress = "Done ✓"
             _push_history(s, s.prompt, self._resolved_seed, s.duration, file_path)
             _step_seed_after_generation(s, self._resolved_seed)
-            # Auto-import if BVH
             ext = os.path.splitext(file_path)[1].lower()
-            if ext == ".bvh":
+            if ext == ".bvh" or _is_gltf(file_path):
                 result = bpy.ops.kimodo.import_bvh('EXEC_DEFAULT', filepath=file_path)
+                kind = "glTF" if _is_gltf(file_path) else "BVH"
                 if 'FINISHED' in result:
                     self.report({'INFO'}, f"Motion generated and imported from {os.path.basename(file_path)}")
                 else:
-                    self.report({'WARNING'}, f"Motion generated ({os.path.basename(file_path)}) but BVH import failed — see error above.")
+                    self.report({'WARNING'}, f"Motion generated ({os.path.basename(file_path)}) but {kind} import failed — see error above.")
             else:
                 self.report({'INFO'}, f"Motion saved to {file_path} (NPZ — import manually)")
         else:
@@ -423,7 +686,7 @@ class KIMODO_OT_CancelGeneration(Operator):
             return {'CANCELLED'}
         # Stale state (#43): is_generating was saved into the .blend or
         # restored by undo, but no job is actually running — just unlock.
-        if not _generation_state["running"] and not sc.is_busy():
+        if not _generation_state["running"] and not sc.is_busy() and not rc.is_busy():
             s.is_generating = False
             s.generating_segment_index = -1
             s.generation_progress = ""
@@ -431,6 +694,7 @@ class KIMODO_OT_CancelGeneration(Operator):
             return {'FINISHED'}
         _generation_state["cancelled"] = True
         sc.request_cancel()
+        rc.request_cancel()
         s.generation_progress = "Cancelling…"
         self.report({'INFO'}, "Cancellation requested — result will be discarded.")
         return {'FINISHED'}
@@ -540,19 +804,22 @@ class KIMODO_OT_ImportBVH(Operator):
         before = set(bpy.context.scene.objects)
 
         try:
-            _import_bvh(
-                filepath=path,
-                axis_forward='-Z',
-                axis_up='Y',
-                target='ARMATURE',
-                global_scale=0.01,   # BVH is usually in cm; Blender expects meters
-                frame_start=1,
-                use_fps_scale=False,
-                update_scene_fps=False,
-                update_scene_duration=True,
-                use_cyclic=False,
-                rotate_mode='NATIVE',
-            )
+            if _is_gltf(path):
+                _import_gltf(path, start_frame=1, update_scene_duration=True)
+            else:
+                _import_bvh(
+                    filepath=path,
+                    axis_forward='-Z',
+                    axis_up='Y',
+                    target='ARMATURE',
+                    global_scale=0.01,   # BVH is usually in cm; Blender expects meters
+                    frame_start=1,
+                    use_fps_scale=False,
+                    update_scene_fps=False,
+                    update_scene_duration=True,
+                    use_cyclic=False,
+                    rotate_mode='NATIVE',
+                )
         except RuntimeError as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
@@ -1042,8 +1309,7 @@ class KIMODO_OT_GenerateSegment(Operator):
         if not (0 <= idx < len(s.motion_segments)):
             self.report({'ERROR'}, "No segment selected.")
             return {'CANCELLED'}
-        if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+        if not _require_generator(self, s):
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating — please wait.")
@@ -1063,8 +1329,16 @@ class KIMODO_OT_GenerateSegment(Operator):
         duration = (seg.end_frame - seg.start_frame + 1) / fps
         self._segment_duration = duration
 
-        # Build constraints for this segment if any exist
-        constraints_json, con_err = _build_segment_constraints(context, seg)
+        # Constraints are indexed from this segment's first frame so they
+        # line up with the clip imported at seg.start_frame.
+        remote_args = None
+        if _uses_remote(s):
+            remote_args, con_err = _remote_generation_args(
+                context, scene_start_override=seg.start_frame,
+            )
+            constraints_json = None
+        else:
+            constraints_json, con_err = _build_segment_constraints(context, seg)
         if con_err:
             self.report({'WARNING'},
                         f"Constraint build failed (generating without): {con_err}")
@@ -1077,7 +1351,8 @@ class KIMODO_OT_GenerateSegment(Operator):
 
         self._thread = threading.Thread(
             target=self._run_generation,
-            args=(seg.prompt, duration, seed, s.output_format, constraints_json, s.bvh_standard_tpose),
+            args=(seg.prompt, duration, seed, s.output_format, constraints_json,
+                  s.bvh_standard_tpose, remote_args),
             daemon=True,
         )
         self._thread.start()
@@ -1087,19 +1362,25 @@ class KIMODO_OT_GenerateSegment(Operator):
         wm.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
-    def _run_generation(self, prompt, duration, seed, fmt, constraints_json, bvh_standard_tpose):
+    def _run_generation(self, prompt, duration, seed, fmt, constraints_json,
+                        bvh_standard_tpose, remote_args=None):
         def progress_cb(msg):
             _generation_state["progress"] = msg
 
-        success, result = sc.generate_motion(
-            prompt=prompt,
-            duration=duration,
-            seed=seed,
-            output_format=fmt,
-            constraints_json=constraints_json,
-            bvh_standard_tpose=bvh_standard_tpose,
-            progress_callback=progress_cb,
-        )
+        if remote_args is not None:
+            success, result = _generate_remote(
+                [prompt], [duration], [seed], remote_args, progress_cb,
+            )
+        else:
+            success, result = sc.generate_motion(
+                prompt=prompt,
+                duration=duration,
+                seed=seed,
+                output_format=fmt,
+                constraints_json=constraints_json,
+                bvh_standard_tpose=bvh_standard_tpose,
+                progress_callback=progress_cb,
+            )
         _generation_state["success"] = success
         _generation_state["result"]  = result
         _generation_state["done"]    = True
@@ -1124,6 +1405,7 @@ class KIMODO_OT_GenerateSegment(Operator):
         s.generating_segment_index = -1
 
         if _generation_state["cancelled"]:
+            _discard_result_file()
             s.generation_progress = "Cancelled"
             self.report({'INFO'}, "Generation cancelled — result discarded.")
         elif _generation_state["success"]:
@@ -1135,7 +1417,7 @@ class KIMODO_OT_GenerateSegment(Operator):
             _push_history(s, seg.prompt, self._resolved_seed, self._segment_duration, file_path)
             _step_seed_after_generation(seg, self._resolved_seed)
 
-            if os.path.splitext(file_path)[1].lower() == ".bvh":
+            if os.path.splitext(file_path)[1].lower() == ".bvh" or _is_gltf(file_path):
                 bpy.ops.kimodo.import_bvh_at_frame(
                     'EXEC_DEFAULT',
                     filepath=file_path,
@@ -1216,8 +1498,7 @@ class KIMODO_OT_GenerateAllSegments(Operator):
 
     def invoke(self, context, event):
         s = context.scene.kimodo
-        if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+        if not _require_generator(self, s):
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating.")
@@ -1254,7 +1535,16 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         print(f"[Kimodo] Generating {len(seeds)} segments with seeds {seeds}", flush=True)
 
         # Build constraints relative to the start of the combined sequence
-        constraints_json, con_err = _build_multi_prompt_constraints(context, self._start_frame)
+        remote_args = None
+        if _uses_remote(s):
+            remote_args, con_err = _remote_generation_args(
+                context, scene_start_override=self._start_frame,
+            )
+            constraints_json = None
+        else:
+            constraints_json, con_err = _build_multi_prompt_constraints(
+                context, self._start_frame,
+            )
         if con_err:
             self.report({'WARNING'},
                         f"Constraint build failed (generating without): {con_err}")
@@ -1272,7 +1562,8 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         self._thread = threading.Thread(
             target=self._run_all,
             args=(prompts, durations, seed, s.output_format,
-                  constraints_json, s.bvh_standard_tpose, num_transition_frames, seeds),
+                  constraints_json, s.bvh_standard_tpose, num_transition_frames, seeds,
+                  remote_args),
             daemon=True,
         )
         self._thread.start()
@@ -1283,9 +1574,20 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         return {'RUNNING_MODAL'}
 
     def _run_all(self, prompts, durations, seed, fmt, constraints_json, bvh_standard_tpose,
-                 num_transition_frames=5, seeds=None):
+                 num_transition_frames=5, seeds=None, remote_args=None):
         def progress_cb(msg):
             _generation_state["progress"] = msg
+
+        if remote_args is not None:
+            success, result = _generate_remote(
+                prompts, durations, seeds if seeds is not None else [seed],
+                remote_args, progress_cb,
+            )
+            _generation_state["success"] = success
+            _generation_state["result"]  = result
+            _generation_state["done"]    = True
+            _generation_state["running"] = False
+            return
 
         success, result = sc.generate_motion_multi(
             prompts=prompts,
@@ -1322,6 +1624,7 @@ class KIMODO_OT_GenerateAllSegments(Operator):
         s.generating_segment_index = -1
 
         if _generation_state["cancelled"]:
+            _discard_result_file()
             s.generation_progress = "Cancelled"
             self.report({'INFO'}, "Generation cancelled — result discarded.")
         elif _generation_state["success"]:
@@ -1341,7 +1644,7 @@ class KIMODO_OT_GenerateAllSegments(Operator):
             for i, seg in enumerate(generated_segments):
                 _step_seed_after_generation(seg, self._resolved_seeds[i] if i < len(self._resolved_seeds) else None)
 
-            if os.path.splitext(file_path)[1].lower() == ".bvh":
+            if os.path.splitext(file_path)[1].lower() == ".bvh" or _is_gltf(file_path):
                 label = f"{len(self._segment_indices)}-prompt"
                 bpy.ops.kimodo.import_bvh_at_frame(
                     'EXEC_DEFAULT',
@@ -1388,18 +1691,25 @@ class KIMODO_OT_ImportBVHAtFrame(Operator):
         before = set(bpy.data.objects)
 
         try:
-            _import_bvh(
-                filepath=self.filepath,
-                axis_forward='-Z', axis_up='Y',
-                target='ARMATURE',
-                global_scale=0.01,
-                frame_start=self.start_frame,
-                use_fps_scale=False,
-                update_scene_fps=False,
-                update_scene_duration=False,
-                use_cyclic=False,
-                rotate_mode='NATIVE',
-            )
+            if _is_gltf(self.filepath):
+                _import_gltf(
+                    self.filepath,
+                    start_frame=self.start_frame,
+                    update_scene_duration=False,
+                )
+            else:
+                _import_bvh(
+                    filepath=self.filepath,
+                    axis_forward='-Z', axis_up='Y',
+                    target='ARMATURE',
+                    global_scale=0.01,
+                    frame_start=self.start_frame,
+                    use_fps_scale=False,
+                    update_scene_fps=False,
+                    update_scene_duration=False,
+                    use_cyclic=False,
+                    rotate_mode='NATIVE',
+                )
         except RuntimeError as e:
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
@@ -1939,12 +2249,33 @@ class KIMODO_OT_PreviewConstraintsJSON(Operator):
     def execute(self, context):
         s = context.scene.kimodo
         try:
-            json_str = cmod.constraints_to_json_string(
-                s.motion_constraints,
-                context.scene,
-                kimodo_fps=s.kimodo_fps,
-                auto_canonicalize=s.auto_canonicalize,
-            )
+            if _uses_remote(s):
+                caps = rc.capabilities()
+                joints = None
+                root = "Hips"
+                if caps:
+                    skel = caps["models"][0]["canonical_skeleton"]
+                    joints = [j["name"] for j in skel["joints"]]
+                    root = next(
+                        (j["name"] for j in skel["joints"] if not j.get("parent")),
+                        "Hips",
+                    )
+                data = cmod.build_mmcp_constraints(
+                    s.motion_constraints,
+                    context.scene,
+                    kimodo_fps=s.kimodo_fps,
+                    auto_canonicalize=s.auto_canonicalize,
+                    skeleton_joints=joints,
+                    root_joint=root,
+                )
+                json_str = json.dumps(data, indent=2)
+            else:
+                json_str = cmod.constraints_to_json_string(
+                    s.motion_constraints,
+                    context.scene,
+                    kimodo_fps=s.kimodo_fps,
+                    auto_canonicalize=s.auto_canonicalize,
+                )
         except Exception as e:
             self.report({'ERROR'}, f"Failed to build JSON: {e}")
             return {'CANCELLED'}
@@ -1984,9 +2315,11 @@ class KIMODO_OT_SetTo30FPS(Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     def execute(self, context):
-        context.scene.render.fps = 30
+        fps = int(round(context.scene.kimodo.kimodo_fps or 30.0))
+        fps = max(1, fps)
+        context.scene.render.fps = fps
         context.scene.render.fps_base = 1.0
-        self.report({'INFO'}, "Scene FPS set to 30.")
+        self.report({'INFO'}, f"Scene FPS set to {fps}.")
         return {'FINISHED'}
 
 
@@ -2034,7 +2367,7 @@ class KIMODO_OT_ReimportFromHistory(Operator):
             return {'CANCELLED'}
         entry = s.generation_history[self.index]
         if not os.path.isfile(entry.bvh_path):
-            self.report({'ERROR'}, f"BVH file no longer exists: {entry.bvh_path}")
+            self.report({'ERROR'}, f"Motion file no longer exists: {entry.bvh_path}")
             return {'CANCELLED'}
         bpy.ops.kimodo.import_bvh('EXEC_DEFAULT', filepath=entry.bvh_path)
         self.report({'INFO'}, f"Re-imported '{os.path.basename(entry.bvh_path)}'")
@@ -2074,13 +2407,13 @@ class KIMODO_OT_GenerateVariations(Operator):
     def invoke(self, context, event):
         s = context.scene.kimodo
 
-        if not sc.is_running():
-            self.report({'WARNING'}, "Kimodo is not running — click 'Start Kimodo' first.")
+        if not _require_generator(self, s):
             return {'CANCELLED'}
         if s.is_generating:
             self.report({'WARNING'}, "Already generating — please wait.")
             return {'CANCELLED'}
 
+        self._remote      = _uses_remote(s)
         self._total       = s.num_variations
         self._seeds       = [random.randint(0, 2**31 - 1) for _ in range(self._total)]
         self._current_idx = 0
@@ -2103,26 +2436,39 @@ class KIMODO_OT_GenerateVariations(Operator):
         _reset_state()
         _generation_state["running"] = True
 
+        remote_args = None
+        if self._remote:
+            # Variations match the local path: prompt and seed only, no constraints.
+            remote_args = {
+                "constraints": [],
+                "transition_frames": s.num_transition_frames,
+            }
         self._thread = threading.Thread(
             target=self._run_one,
-            args=(s.prompt, s.duration, seed, s.output_format, s.bvh_standard_tpose),
+            args=(s.prompt, s.duration, seed, s.output_format, s.bvh_standard_tpose,
+                  remote_args),
             daemon=True,
         )
         self._thread.start()
 
-    def _run_one(self, prompt, duration, seed, fmt, bvh_standard_tpose):
+    def _run_one(self, prompt, duration, seed, fmt, bvh_standard_tpose, remote_args=None):
         def progress_cb(msg):
             _generation_state["progress"] = msg
 
-        success, result = sc.generate_motion(
-            prompt=prompt,
-            duration=duration,
-            seed=seed,
-            output_format=fmt,
-            constraints_json=None,
-            bvh_standard_tpose=bvh_standard_tpose,
-            progress_callback=progress_cb,
-        )
+        if remote_args is not None:
+            success, result = _generate_remote(
+                [prompt], [duration], [seed], remote_args, progress_cb,
+            )
+        else:
+            success, result = sc.generate_motion(
+                prompt=prompt,
+                duration=duration,
+                seed=seed,
+                output_format=fmt,
+                constraints_json=None,
+                bvh_standard_tpose=bvh_standard_tpose,
+                progress_callback=progress_cb,
+            )
         _generation_state["success"] = success
         _generation_state["result"]  = result
         _generation_state["done"]    = True
@@ -2151,6 +2497,7 @@ class KIMODO_OT_GenerateVariations(Operator):
         var_num   = self._current_idx + 1
 
         if _generation_state["cancelled"]:
+            _discard_result_file()
             context.window_manager.event_timer_remove(self._timer)
             s.is_generating = False
             s.generation_progress = "Cancelled"
@@ -2168,21 +2515,24 @@ class KIMODO_OT_GenerateVariations(Operator):
         file_path = _generation_state["result"]
         ext = os.path.splitext(file_path)[1].lower()
 
-        if ext == ".bvh":
+        if ext == ".bvh" or _is_gltf(file_path):
             before = set(bpy.data.objects)
             try:
-                _import_bvh(
-                    filepath=file_path,
-                    axis_forward='-Z', axis_up='Y',
-                    target='ARMATURE',
-                    global_scale=0.01,
-                    frame_start=1,
-                    use_fps_scale=False,
-                    update_scene_fps=False,
-                    update_scene_duration=True,
-                    use_cyclic=False,
-                    rotate_mode='NATIVE',
-                )
+                if _is_gltf(file_path):
+                    _import_gltf(file_path, start_frame=1, update_scene_duration=True)
+                else:
+                    _import_bvh(
+                        filepath=file_path,
+                        axis_forward='-Z', axis_up='Y',
+                        target='ARMATURE',
+                        global_scale=0.01,
+                        frame_start=1,
+                        use_fps_scale=False,
+                        update_scene_fps=False,
+                        update_scene_duration=True,
+                        use_cyclic=False,
+                        rotate_mode='NATIVE',
+                    )
             except RuntimeError as e:
                 context.window_manager.event_timer_remove(self._timer)
                 s.is_generating = False

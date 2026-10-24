@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.6.0] — 2026-10-23
+
+### Added
+
+- **Remote URL backend**: The Connection panel can talk to a motionmcp-kimodo server over HTTP instead of loading Kimodo on this machine. Set Backend to Remote URL, enter the server address (for example `http://192.168.1.10:8766`), and click Connect. Generate, timeline segments, and variations all go to that server and import the returned glTF as `Kimodo_Source`. Machines without an NVIDIA GPU default to this backend. Root, hand, foot, and full-body markers are sent as MMCP constraints.
+
 ## [1.5.8] — 2026-08-20
 
 ### Changed

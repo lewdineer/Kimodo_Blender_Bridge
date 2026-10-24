@@ -267,10 +267,30 @@ class KIMODO_BoneMappingItem(PropertyGroup):
 # Scene-level settings
 # ---------------------------------------------------------------------------
 
+def _default_connection_backend() -> str:
+    """Remote when this machine has no NVIDIA GPU, so an AMD/Intel box
+    opens ready to use a homelab server. NVIDIA machines keep the local
+    subprocess path."""
+    try:
+        from . import setup_operator as so
+        return 'LOCAL' if so.has_nvidia_gpu() else 'REMOTE'
+    except Exception:
+        return 'LOCAL'
+
+
 class KIMODO_SceneSettings(PropertyGroup):
     """Stored on bpy.context.scene.kimodo — all per-scene settings."""
 
-    # --- Connection (subprocess bridge) ---
+    # Where Kimodo runs (local GPU vs remote URL) lives in the addon
+    # preferences, so one choice applies to every scene.
+    server_url: StringProperty(
+        name="Server URL",
+        description=(
+            "Address of a motionmcp-kimodo server. "
+            "Example: http://192.168.1.10:8766"
+        ),
+        default="http://192.168.1.10:8766",
+    )
     show_advanced_connection: BoolProperty(
         name="Advanced",
         description=(
@@ -521,6 +541,16 @@ class KIMODO_SceneSettings(PropertyGroup):
 class KIMODO_AddonPreferences(AddonPreferences):
     bl_idname = __package__
 
+    connection_backend: EnumProperty(
+        name="Kimodo",
+        description="Where motion is generated. Remote hides the local installer",
+        items=[
+            ('LOCAL',  "Local",  "Run Kimodo on this machine (NVIDIA GPU)"),
+            ('REMOTE', "Remote", "Use a Kimodo server on another machine"),
+        ],
+        default=_default_connection_backend(),
+    )
+
     saved_presets: StringProperty(
         name="Saved Presets",
         description="JSON blob of all saved bone-mapping presets",
@@ -560,6 +590,36 @@ class KIMODO_AddonPreferences(AddonPreferences):
         subtype='DIR_PATH',
     )
 
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Where Kimodo runs:")
+        layout.prop(self, "connection_backend", expand=True)
+        if self.connection_backend == 'REMOTE':
+            layout.label(
+                text="Remote: Install Kimodo (Auto) is hidden. Set the URL in the Kimodo panel.",
+                icon='URL',
+            )
+        else:
+            col = layout.column()
+            col.prop(self, "hf_token")
+            col.prop(self, "system_python_override")
+            col.prop(self, "install_location")
+
+
+def addon_preferences(context=None):
+    """This addon's preferences, or None if they are not available yet."""
+    ctx = context or bpy.context
+    try:
+        return ctx.preferences.addons[__package__].preferences
+    except Exception:
+        return None
+
+
+def uses_remote(context=None) -> bool:
+    """True when the addon preference is set to a remote Kimodo server."""
+    prefs = addon_preferences(context)
+    return bool(prefs and prefs.connection_backend == 'REMOTE')
+
 
 # ---------------------------------------------------------------------------
 # Transient-state cleanup (#43)
@@ -580,6 +640,11 @@ def _reset_transient_generation_state() -> None:
             k.generation_progress = ""
         if k.generating_segment_index != -1:
             k.generating_segment_index = -1
+        # Remote connect caches the server skeleton in this process. A loaded
+        # file cannot still be connected, so don't leave the flag set.
+        if uses_remote() and k.is_connected:
+            k.is_connected = False
+            k.connection_status = "Not started"
 
 
 @bpy.app.handlers.persistent

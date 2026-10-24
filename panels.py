@@ -10,6 +10,8 @@ import bpy
 import json
 from bpy.types import Panel
 
+from . import properties as props
+
 
 # ---------------------------------------------------------------------------
 # Base class — common settings
@@ -113,6 +115,10 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
 
         running = s.is_connected
 
+        if props.uses_remote(context):
+            self._draw_remote(layout, s, running)
+            return
+
         # --- Auto-install section ---
         from . import setup_operator as so
 
@@ -182,6 +188,7 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
                 box.label(text="NVIDIA GPU required!", icon='ERROR')
                 box.label(text="Kimodo only works with NVIDIA GPUs (CUDA).")
                 box.label(text="AMD and Intel GPUs are not supported.")
+                box.label(text="Or set Remote in this addon's preferences.")
                 box.separator(factor=0.3)
             else:
                 box.label(text="Kimodo not installed", icon='INFO')
@@ -230,21 +237,7 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             layout.operator("kimodo.start_kimodo",
                             text="Start Kimodo", icon='PLAY')
 
-        # --- Status ---
-        status_row = layout.row()
-        if running:
-            status_row.label(text=s.connection_status, icon='CHECKMARK')
-        elif s.connection_status in ("Not started", "Stopped"):
-            status_row.label(text=s.connection_status, icon='RADIOBUT_OFF')
-        else:
-            # Loading or error
-            is_err = s.connection_status.startswith("Failed") or \
-                     s.connection_status.startswith("Error")
-            status_row.label(
-                text=s.connection_status,
-                icon='ERROR' if is_err else 'TIME',
-            )
-
+        self._draw_status(layout, s, running)
 
         # --- Delete venv (always shown when installed) ---
         if so.is_installed() and not so.is_installing():
@@ -252,6 +245,35 @@ class KIMODO_PT_Connection(KIMODO_PanelBase, Panel):
             row = layout.row()
             row.alignment = 'RIGHT'
             row.operator("kimodo.reset_venv", text="Delete Venv", icon='TRASH', emboss=False)
+
+    def _draw_remote(self, layout, s, running):
+        """URL field and Connect. The local installer stays hidden."""
+        layout.label(text="Remote — change under Edit > Preferences > Add-ons", icon='PREFERENCES')
+        col = layout.column(align=True)
+        col.enabled = not running
+        col.label(text="Server URL:", icon='URL')
+        col.prop(s, "server_url", text="")
+        col.label(text="motionmcp-kimodo, e.g. http://192.168.1.10:8766", icon='INFO')
+
+        layout.separator(factor=0.5)
+        if running:
+            layout.operator("kimodo.stop_kimodo", text="Disconnect", icon='CANCEL')
+        else:
+            layout.operator("kimodo.start_kimodo", text="Connect", icon='LINKED')
+
+        self._draw_status(layout, s, running)
+
+    def _draw_status(self, layout, s, running):
+        status_row = layout.row()
+        status = s.connection_status or ""
+        if running:
+            status_row.label(text=status, icon='CHECKMARK')
+        elif status in ("Not started", "Stopped"):
+            status_row.label(text=status, icon='RADIOBUT_OFF')
+        else:
+            is_err = status.startswith("Failed") or status.startswith("Error") or \
+                     status.startswith("Not an ") or status.startswith("Could not")
+            status_row.label(text=status, icon='ERROR' if is_err else 'TIME')
 
     def _draw_advanced(self, box, context, s, show_python=False):
         """Collapsible Advanced overrides: Python path, HF token, install location.
@@ -315,6 +337,7 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
     def draw(self, context):
         layout = self.layout
         s = context.scene.kimodo
+        remote = props.uses_remote(context)
         layout.enabled = not s.is_generating
 
         mode_row = layout.row(align=True)
@@ -336,7 +359,9 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
         layout.separator()
 
         # --- Shared: output options ---
-        layout.prop(s, "bvh_standard_tpose", icon='ARMATURE_DATA')
+        # Remote servers return glTF; the BVH rest-pose option only applies locally.
+        if not remote:
+            layout.prop(s, "bvh_standard_tpose", icon='ARMATURE_DATA')
         reuse_row = layout.row(align=True)
         reuse_row.prop(s, "reuse_armature", text="Reuse", icon='ARMATURE_DATA')
         reuse_row.operator("kimodo.pick_latest_armature", text="", icon='SORTTIME')
@@ -348,11 +373,19 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
 
         # --- Shared: FPS warning ---
         scene_fps = context.scene.render.fps / context.scene.render.fps_base
-        if abs(scene_fps - 30.0) > 0.01:
+        target_fps = s.kimodo_fps or 30.0
+        if abs(scene_fps - target_fps) > 0.01:
             fps_box = layout.box()
             fps_box.alert = True
-            fps_box.label(text=f"Scene is {scene_fps:.4g} FPS — Kimodo needs 30 FPS", icon='ERROR')
-            fps_box.operator("kimodo.set_to_30fps", text="Set to 30 FPS", icon='RECOVER_LAST')
+            fps_box.label(
+                text=f"Scene is {scene_fps:.4g} FPS — Kimodo is {target_fps:.4g} FPS",
+                icon='ERROR',
+            )
+            fps_box.operator(
+                "kimodo.set_to_30fps",
+                text=f"Set to {target_fps:.4g} FPS",
+                icon='RECOVER_LAST',
+            )
 
         layout.separator()
 
@@ -396,7 +429,7 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
         box = layout.box()
         box.label(text="Manual Import", icon='IMPORT')
         row = box.row()
-        row.prop(s, "last_bvh_path", text="BVH Path")
+        row.prop(s, "last_bvh_path", text="File")
         row.operator("kimodo.import_bvh", text="", icon='FILE_FOLDER').filepath = ""
 
     def _draw_single(self, layout, context, s):
@@ -412,9 +445,10 @@ class KIMODO_PT_Generate(KIMODO_PanelBase, Panel):
         seed_modes.alignment = 'RIGHT'
         seed_modes.prop(s, "seed_mode", expand=True)
 
-        row = layout.row(align=True)
-        row.label(text="Output:")
-        row.prop(s, "output_format", expand=True)
+        if not props.uses_remote(context):
+            row = layout.row(align=True)
+            row.label(text="Output:")
+            row.prop(s, "output_format", expand=True)
 
     def _draw_timeline(self, layout, context, s):
         row = layout.row(align=True)
@@ -735,10 +769,9 @@ class KIMODO_PT_Help(KIMODO_PanelBase, Panel):
         col = layout.column(align=True)
         col.label(text="Quick Start:", icon='QUESTION')
         col.separator()
-        col.label(text="1. Click 'Install Kimodo (Auto)' in the Connection panel")
-        col.label(text="   (or point Kimodo Python at your own venv)")
-        col.label(text="2. Start Kimodo")
-        col.label(text="   (model loads once, stays loaded)")
+        col.label(text="1. Local: Install Kimodo, then Start Kimodo")
+        col.label(text="   Remote URL: enter the server address and Connect")
+        col.label(text="2. Wait until the status says Ready")
         col.separator()
         col.label(text="3. Enter prompt → Generate Motion")
         col.label(text="4. In Retarget tab, Pick source + target rigs")

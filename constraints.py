@@ -531,3 +531,245 @@ def constraints_to_json_string(
     """Return the constraints as a formatted JSON string."""
     data = build_constraints_json(constraint_items, scene, kimodo_fps, auto_canonicalize)
     return json.dumps(data, indent=indent)
+
+
+# ---------------------------------------------------------------------------
+# MMCP constraint builder (remote motionmcp-kimodo server)
+# ---------------------------------------------------------------------------
+#
+# The remote server does not accept the local bridge's constraint JSON.
+# It wants MMCP constraints in the same Y-up metres this module already
+# produces: root_path, effector_target, and pose_keyframe.
+
+def _axis_angle_to_xyzw(aa: list[float]) -> list[float]:
+    """Kimodo axis-angle 3-vector (axis * angle, radians) → quaternion xyzw."""
+    ax, ay, az = aa
+    angle = math.sqrt(ax * ax + ay * ay + az * az)
+    if angle < 1e-8:
+        return [0.0, 0.0, 0.0, 1.0]
+    half = angle * 0.5
+    scale = math.sin(half) / angle
+    return [ax * scale, ay * scale, az * scale, math.cos(half)]
+
+
+def _blender_quat_to_kimodo_xyzw(q: mathutils.Quaternion) -> list[float]:
+    """Blender world quaternion → Kimodo Y-up quaternion xyzw."""
+    # Same basis change as blender_to_kimodo_pos: (x, y, z) → (x, z, -y).
+    basis = mathutils.Matrix(((1, 0, 0), (0, 0, 1), (0, -1, 0)))
+    rotated = basis @ q.to_matrix().to_3x3() @ basis.transposed()
+    out = rotated.to_quaternion()
+    return [out.x, out.y, out.z, out.w]
+
+
+def _bone_global_quat_xyzw(armature_obj: bpy.types.Object, bone_name: str):
+    """Pose bone's world rotation in Kimodo space, or None if the bone is missing."""
+    pb = armature_obj.pose.bones.get(bone_name)
+    if pb is None:
+        return None
+    world = (armature_obj.matrix_world @ pb.matrix).to_3x3()
+    return _blender_quat_to_kimodo_xyzw(world.to_quaternion())
+
+
+def _dedupe_ascending(frames: list[int], *columns: list) -> tuple:
+    """Keep the last sample at each frame and return strictly ascending frames."""
+    order = sorted(range(len(frames)), key=lambda i: frames[i])
+    kept_frames: list[int] = []
+    kept_cols: list[list] = [[] for _ in columns]
+    for i in order:
+        if kept_frames and frames[i] <= kept_frames[-1]:
+            if frames[i] == kept_frames[-1]:
+                for col, src in zip(kept_cols, columns):
+                    col[-1] = src[i]
+            continue
+        kept_frames.append(frames[i])
+        for col, src in zip(kept_cols, columns):
+            col.append(src[i])
+    return (kept_frames, *kept_cols)
+
+
+def build_mmcp_constraints(
+    constraint_items,
+    scene: bpy.types.Scene,
+    kimodo_fps: float = 30.0,
+    auto_canonicalize: bool = True,
+    scene_start_override: "int | None" = None,
+    skeleton_joints: "list[str] | None" = None,
+    root_joint: str = "Hips",
+) -> list[dict]:
+    """
+    Convert Blender constraint markers into MMCP constraint dicts.
+
+    Positions are Kimodo/MMCP Y-up metres (see blender_to_kimodo_pos).
+    ``skeleton_joints``, when given, is the server's canonical joint list;
+    a marker whose joint is not in that list is skipped with an error so
+    the caller can warn instead of sending a request the server will reject.
+    """
+    blender_fps = scene.render.fps / scene.render.fps_base
+    scene_start = scene.frame_start if scene_start_override is None else scene_start_override
+    known = set(skeleton_joints) if skeleton_joints else None
+
+    items = sorted(
+        [ci for ci in constraint_items if ci.enabled and ci.marker_object],
+        key=lambda ci: ci.frame,
+    )
+    if not items:
+        return []
+
+    saved_frame = scene.frame_current
+    try:
+        origin_offset = [0.0, 0.0]
+        if auto_canonicalize:
+            for ci in items:
+                if ci.constraint_type == 'root2d':
+                    origin_offset = blender_to_kimodo_2d(ci.marker_object.location)
+                    break
+                if ci.constraint_type == 'fullbody':
+                    _evaluate_frame(scene, ci.frame)
+                    pos3d = get_root_position(ci.marker_object)
+                    origin_offset = [pos3d[0], pos3d[2]]
+                    break
+
+        def apply_offset_2d(pos2d):
+            return [pos2d[0] - origin_offset[0], pos2d[1] - origin_offset[1]]
+
+        def apply_offset_3d(pos3d):
+            return [pos3d[0] - origin_offset[0], pos3d[1], pos3d[2] - origin_offset[1]]
+
+        def kframe(blender_frame: int) -> int:
+            return blender_frame_to_kimodo(
+                blender_frame, scene_start, blender_fps, kimodo_fps,
+            )
+
+        out: list[dict] = []
+
+        root_frames: list[int] = []
+        root_xz: list[list[float]] = []
+        root_heading: list[float] = []
+        root_heading_complete = True
+
+        effector_samples: dict[str, dict] = {}
+
+        for ci in items:
+            ctype = ci.constraint_type
+            obj = ci.marker_object
+            frame = kframe(ci.frame)
+
+            if ctype == 'root2d':
+                root_frames.append(frame)
+                root_xz.append(apply_offset_2d(blender_to_kimodo_2d(obj.location)))
+                if ci.include_heading:
+                    root_heading.append(float(ci.heading_angle))
+                else:
+                    root_heading_complete = False
+                continue
+
+            if ctype == 'fullbody':
+                if obj.type == 'ARMATURE':
+                    _evaluate_frame(scene, ci.frame)
+                    root_pos = apply_offset_3d(get_root_position(obj))
+                    rotations = get_armature_joint_rots(obj, SOMA_JOINT_ORDER)
+                    joint_rotations = {}
+                    for name, aa in zip(SOMA_JOINT_ORDER, rotations):
+                        if known is not None and name not in known:
+                            continue
+                        if obj.pose.bones.get(name) is None:
+                            continue
+                        joint_rotations[name] = _axis_angle_to_xyzw(aa)
+                    if not joint_rotations:
+                        joint_rotations[root_joint] = [0.0, 0.0, 0.0, 1.0]
+                else:
+                    root_pos = apply_offset_3d(blender_to_kimodo_pos(obj.location))
+                    joint_rotations = {root_joint: [0.0, 0.0, 0.0, 1.0]}
+                if known is not None and root_joint not in known and root_joint in joint_rotations:
+                    # Identity on an unknown root name would be rejected.
+                    if len(joint_rotations) == 1:
+                        raise ValueError(
+                            f"Server skeleton has no joint '{root_joint}' for a full-body pose"
+                        )
+                    joint_rotations.pop(root_joint, None)
+                # fill_mode "rest" asks the server for a full-body constraint.
+                # "generate" collapses a posed body down to end effectors.
+                out.append({
+                    "type": "pose_keyframe",
+                    "frame": frame,
+                    "joint_rotations": joint_rotations,
+                    "root_position": root_pos,
+                    "fill_mode": "rest",
+                })
+                continue
+
+            if ctype in EFFECTOR_BONE:
+                joint = EFFECTOR_BONE[ctype]
+                if known is not None and joint not in known:
+                    raise ValueError(
+                        f"Server skeleton has no joint '{joint}' for a {ctype} constraint"
+                    )
+                if obj.type == 'ARMATURE':
+                    _evaluate_frame(scene, ci.frame)
+                    pos = get_bone_world_position(obj, joint)
+                    if pos is None:
+                        pos = blender_to_kimodo_pos(obj.location)
+                    rotation = _bone_global_quat_xyzw(obj, joint)
+                else:
+                    pos = blender_to_kimodo_pos(obj.location)
+                    rotation = None
+                    if obj.matrix_world.to_quaternion().angle > 1e-3:
+                        rotation = _blender_quat_to_kimodo_xyzw(
+                            obj.matrix_world.to_quaternion()
+                        )
+                bucket = effector_samples.setdefault(
+                    joint, {"frames": [], "positions": [], "rotations": []},
+                )
+                bucket["frames"].append(frame)
+                bucket["positions"].append(apply_offset_3d(pos))
+                bucket["rotations"].append(rotation)
+
+        if root_frames:
+            if root_heading_complete and len(root_heading) == len(root_frames):
+                frames, xz, heading = _dedupe_ascending(root_frames, root_xz, root_heading)
+                block = {
+                    "type": "root_path",
+                    "frames": frames,
+                    "positions_xz": xz,
+                    "heading_radians": heading,
+                }
+            else:
+                frames, xz = _dedupe_ascending(root_frames, root_xz)
+                block = {
+                    "type": "root_path",
+                    "frames": frames,
+                    "positions_xz": xz,
+                }
+            if frames:
+                out.append(block)
+
+        for joint, bucket in effector_samples.items():
+            rotations = bucket["rotations"]
+            if all(r is not None for r in rotations):
+                frames, positions, rots = _dedupe_ascending(
+                    bucket["frames"], bucket["positions"], rotations,
+                )
+                block = {
+                    "type": "effector_target",
+                    "joint": joint,
+                    "frames": frames,
+                    "positions": positions,
+                    "rotations": rots,
+                }
+            else:
+                frames, positions = _dedupe_ascending(
+                    bucket["frames"], bucket["positions"],
+                )
+                block = {
+                    "type": "effector_target",
+                    "joint": joint,
+                    "frames": frames,
+                    "positions": positions,
+                }
+            if frames:
+                out.append(block)
+
+        return out
+    finally:
+        scene.frame_set(saved_frame)
+        bpy.context.view_layer.update()

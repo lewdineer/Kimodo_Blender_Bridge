@@ -5,8 +5,8 @@ Runs NVIDIA Kimodo in a managed subprocess for AI-powered human(oid)
 motion generation directly inside Blender.
 
 Features:
-  • Generate motion from text prompts via a persistent bridge process
-    (bridge_server.py, JSON over stdin/stdout — model loads once)
+  • Generate motion from text prompts, either in a local bridge process
+    (bridge_server.py) or on a remote motionmcp-kimodo server (HTTP URL)
   • Automatic BVH import into Blender armature
   • Custom bone-mapping retargeting to any existing rig
   • Constraint-based retargeting with one-click bake
@@ -22,11 +22,11 @@ Requirements:
 bl_info = {
     "name":        "Kimodo Blender Bridge",
     "author":      "Lewdineer",
-    "version":     (1, 5, 8),
+    "version":     (1, 6, 0),
     "blender":     (4, 2, 0),
     "location":    "View3D › Sidebar (N-Panel) › Kimodo",
-    "description": "Generate human motion with NVIDIA Kimodo AI. "
-                   "Connects to a running Kimodo Gradio instance.",
+    "description": "Generate human motion with NVIDIA Kimodo AI, "
+                   "locally or on a remote server.",
     "doc_url":     "https://github.com/nv-tlabs/kimodo",
     "tracker_url": "https://github.com/nv-tlabs/kimodo/issues",
     "category":    "Animation",
@@ -39,6 +39,7 @@ import bpy
 from . import properties, operators, ui_list, panels, constraints, timeline
 from . import setup_operator
 from . import subprocess_client as sc
+from . import remote_client as rc
 
 
 def register():
@@ -51,7 +52,8 @@ def register():
 
 
 def unregister():
-    # Kill the bridge process so we don't leave orphaned GPU processes
+    # Kill the local bridge process so we don't leave orphaned GPU processes.
+    rc.disconnect()
     sc.stop()
     timeline.unregister()
     panels.unregister()
